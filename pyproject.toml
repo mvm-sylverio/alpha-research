@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alpha-research"
+version = "0.1.0"
+description = "Systematic alpha research framework focused on signal discovery, validation, and robustness."
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0.0",
+    "polars>=1.0.0",
+    "statsmodels>=0.14.0",
+    "MetaTrader5>=5.0.0",
+]
+
+authors = [
+    {name = 'Marcos Vinicius M. Sylverio'}
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["alpha_research*"]
