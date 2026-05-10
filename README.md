@@ -6,40 +6,18 @@ Inspired by concepts from:
 - Active Portfolio Management — Grinold & Kahn
 - Advances in Financial Machine Learning — Marcos López de Prado
 
-## Core Ideas
-
-- Cross-sectional alpha research
-- Information Coefficient (IC)
-- IC stability through time
-- Research reproducibility
-
 ## Stack
 
-- Python
-- Polars
-- NumPy
-- Scikit-learn
-- DuckDB
-
-## Status
-
-Work in progress.
-
-### Current Components
-
-- Market data ingestion
-- Feature generation
-- Forward return targets
-- Cross-sectional IC analysis
-- Rolling IC stability
+Python - Polars - NumPy - Scikit-learn
 
 ## Roadmap
+In progress as of May 2026.
 
 ### Phase 1 — Research Foundations
-- [ ] Market data ingestion
-- [ ] Feature generation
-- [ ] Forward return targets
-- [ ] Cross-sectional IC analysis
+- [x] Market data ingestion
+- [x] Feature generation
+- [x] Forward return targets
+- [x] Cross-sectional IC analysis
 - [ ] Rolling IC stability
 - [ ] Signal return evaluation
 - [ ] Quantile portfolio analysis
