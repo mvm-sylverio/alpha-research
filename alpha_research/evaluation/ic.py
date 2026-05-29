@@ -6,9 +6,10 @@ from typing import Literal
 def compute_IC(df: pl.DataFrame,
                feature_col: str,
                target_col: str,
-               corr_method: Literal['pearson', 'spearman'] = 'pearson'):
+               corr_method: Literal['pearson', 'spearman'] = 'spearman'):
     """
     Information Coefficient of a feature and a target.
+    :param corr_method: Use 'pearson' for linear correlation and 'spearman' for general monotocnical correlation.
     """
 
     # Check if columns exist in df
