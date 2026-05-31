@@ -151,8 +151,6 @@ def _compute_ic_polars(
     return df_ic
 
 
-def IC_metrics(df_ic: pl.DataFrame,
-               target_col: str):
 def compute_ic(
         df: pd.DataFrame | pl.DataFrame,
         feature: str,
@@ -211,23 +209,43 @@ def compute_ic(
         return _compute_ic_polars(df, feature, target, corr_method, date_column, ic_column)
 
 
+@dataclass(frozen=True, slots=True)  # unchangable object results and attributes
+class ICMetrics:
+    mean: float
+    abs_mean: float
+    sign: int
+    std: float
+    stability: float
+    pct_positive: float
+    quantiles: dict
+    original_series: pd.Series
+    adjusted_series: pd.Series
+
+
+def compute_ic_metrics(ic_series_data: pd.Series | pl.Series) -> ICMetrics:
     """
-    Computes mean, std and estability index of IC serie.
+    Computes mean, std and stability index of IC serie.
     """
 
-    ic_serie = df_ic[f'IC_{target_col}'].to_numpy()
+    ic_series = ic_series_data.to_numpy()  # to_numpy unifies treatment of the code below
+    ic_mean = np.mean(ic_series)
+    sign=np.sign(ic_mean)
 
-    ic_mean = np.mean(ic_serie)
+    ic_std = np.std(ic_series, ddof=1)  # ddof=1 -> sample
 
-    # ddof=1 -> sample
-    ic_std = np.std(ic_serie, ddof=1)
+    adjusted_series = sign * ic_series
 
-    return {
-        "IC_mean": float(ic_mean),
-        "IC_std": float(ic_std),
-        "IC_estability": float(ic_mean / ic_std) if ic_std > 0 else np.nan,
-        'T': len(ic_serie)
-    }
+    return ICMetrics(
+        mean=float(ic_mean),
+        abs_mean=float(abs(ic_mean)),
+        sign=sign,
+        std=float(ic_std),
+        stability= float(ic_mean / ic_std) if ic_std > 0 else np.nan,
+        pct_positive=np.nan,
+        quantiles={'a': np.nan},
+        original_series=ic_series_data,
+        adjusted_series=pd.Series(adjusted_series)
+    )
 
 
 # --------------------------
