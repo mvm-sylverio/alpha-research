@@ -218,33 +218,36 @@ class ICMetrics:
     stability: float
     pct_positive: float
     quantiles: dict
-    original_series: pd.Series
-    adjusted_series: pd.Series
+    original_series: pd.Series | pl.Series
+    adjusted_series: pd.Series | pl.Series
 
 
-def compute_ic_metrics(ic_series_data: pd.Series | pl.Series) -> ICMetrics:
+def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     """
     Computes mean, std and stability index of IC serie.
     """
 
-    ic_series = ic_series_data.to_numpy()  # to_numpy unifies treatment of the code below
-    ic_mean = np.mean(ic_series)
-    sign=np.sign(ic_mean)
+    ic_arr = ic_series.to_numpy()  # to_numpy unifies treatment of the code below
+    ic_mean = np.mean(ic_arr)
+    ic_std = np.std(ic_arr, ddof=1)  # ddof=1 -> sample
 
-    ic_std = np.std(ic_series, ddof=1)  # ddof=1 -> sample
-
-    adjusted_series = sign * ic_series
+    ic_sign = np.sign(ic_mean)
+    adjusted_arr = ic_sign * ic_arr
 
     return ICMetrics(
         mean=float(ic_mean),
         abs_mean=float(abs(ic_mean)),
-        sign=sign,
+        sign=ic_sign,
         std=float(ic_std),
-        stability= float(ic_mean / ic_std) if ic_std > 0 else np.nan,
-        pct_positive=np.nan,
-        quantiles={'a': np.nan},
-        original_series=ic_series_data,
-        adjusted_series=pd.Series(adjusted_series)
+        stability= float(abs(ic_mean) / ic_std) if ic_std > 0 else np.nan,
+        pct_positive=float(np.mean(adjusted_arr > 0)),
+        quantiles={
+            'q25': np.quantile(adjusted_arr, 0.25),
+            'q50': np.quantile(adjusted_arr, 0.5),
+            'q75': np.quantile(adjusted_arr, 0.75)
+        },
+        original_series=ic_series,
+        adjusted_series=ic_series * ic_sign
     )
 
 
