@@ -282,7 +282,7 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     return ICMetrics(
         mean=float(ic_mean),
         abs_mean=float(abs(ic_mean)),
-        sign=ic_sign,
+        sign=ic_sign if ic_mean != 0 else 1,
         std=float(ic_std),
         stability= float(abs(ic_mean) / ic_std) if ic_std > 0 else np.nan,
         pct_positive=float(np.mean(adjusted_arr > 0)),
