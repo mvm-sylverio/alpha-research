@@ -211,6 +211,34 @@ def compute_ic(
 
 @dataclass(frozen=True, slots=True)  # unchangable object results and attributes
 class ICMetrics:
+    """
+    Immutable container for Information Coefficient general metrics.
+
+    All scalar metrics are read-only after creation.
+
+    Attributes
+    ----------
+    mean : float
+        Mean IC over all dates (preserves sign).
+    abs_mean : float
+        Absolute mean IC. Magnitude of the signal regardless of direction.
+    sign : int
+        Direction of the signal: +1 if mean IC >= 0, -1 otherwise. Aligns signal direction of the feature.
+    std : float
+        Standard deviation of IC (ddof=1).
+    stability : float
+        IC Information Ratio: abs_mean / std.
+        Higher values indicate more consistent signal. nan if std == 0.
+    pct_positive : float
+        Fraction of dates where the adjusted IC > 0, i.e. signal was
+        on the correct side. Computed on adjusted_series.
+    quantiles : dict
+        Quartiles of the adjusted IC series: q25, q50, q75.
+    original_series : pd.Series | pl.Series
+        Raw IC time series as returned by compute_ic().
+    adjusted_series : pd.Series | pl.Series
+        IC series multiplied by sign — always oriented positively. Useful for plotting and further statistical analysis.
+    """
     mean: float
     abs_mean: float
     sign: int
@@ -224,7 +252,24 @@ class ICMetrics:
 
 def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     """
-    Computes mean, std and stability index of IC serie.
+    Compute the general metrics for a time series of IC values.
+
+    Handles inverse signals automatically, flipping metrics to represent the magnitude of the signal.
+
+    Parameters
+    ----------
+    ic_series : pd.Series | pl.Series
+        Time series by date of IC values, as returned by compute_ic().
+
+    Returns
+    -------
+    ICMetrics
+        Dataclass with scalar metrics and both original and
+        sign-adjusted IC series.
+
+    Notes
+    -----
+    pct_positive and quantiles are computed on the sign adjusted series.
     """
 
     ic_arr = ic_series.to_numpy()  # to_numpy unifies treatment of the code below
