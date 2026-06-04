@@ -276,7 +276,12 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     ic_mean = np.mean(ic_arr)
     ic_std = np.std(ic_arr, ddof=1)  # ddof=1 -> sample
 
-    ic_sign = np.sign(ic_mean)
+    # corrections for floating-point precision that will not return 0 when should
+    ic_mean_is_zero = np.isclose(ic_mean, 0, 1e-8)
+    ic_std_is_zero = np.isclose(ic_std, 0, atol=1e-8)
+
+    # sign adjustments
+    ic_sign = np.sign(ic_mean) if not ic_mean_is_zero else 1
     adjusted_arr = ic_sign * ic_arr
 
     return ICMetrics(
@@ -284,7 +289,7 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
         abs_mean=float(abs(ic_mean)),
         sign=ic_sign if ic_mean != 0 else 1,
         std=float(ic_std),
-        stability= float(abs(ic_mean) / ic_std) if ic_std > 0 else np.nan,
+        stability=float(abs(ic_mean) / ic_std) if not ic_std_is_zero else np.nan,
         pct_positive=float(np.mean(adjusted_arr > 0)),
         quantiles={
             'q25': np.quantile(adjusted_arr, 0.25),
