@@ -25,6 +25,7 @@ def compute_newey_west_tstat(
     t_stat: float
     p_value: float
 
+def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
     """
     Compute the Newey-West (HAC-adjusted) t-statistic for the mean of an IC time series.
 
@@ -49,7 +50,7 @@ def compute_newey_west_tstat(
     :return: float HAC-adjusted t-statistic for the mean IC, float pvalue.
     """
 
-    ic = df_ic[f'IC_{target_col}'].to_numpy()
+    ic = ic_series.to_numpy()  # more appropriate for statsmodels
 
     # Constant IC series has zero uncertainty, making the t-stat undefined for practical purposes
     if np.isclose(np.std(ic, ddof=1), 0, atol=1e-8):
