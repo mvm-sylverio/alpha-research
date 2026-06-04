@@ -2,10 +2,12 @@ import pytest
 import numpy as np
 import pandas as pd
 import polars as pl
-from alpha_research.evaluation.ic import information_coefficient, compute_ic
+from alpha_research.evaluation.ic import information_coefficient, compute_ic, compute_ic_metrics
 
 
-# ── fixtures ────────────────────────────────────────────────
+# ------------------------------------------------------
+# fixtures
+# ------------------------------------------------------
 @pytest.fixture
 def perfect_corr():
     x = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
@@ -43,8 +45,36 @@ def cross_section_df_polars():
         'target':  [1.0, 2.0, 3.0, 4.0, 5.0, 5.0, 4.0, 3.0, 2.0, 1.0],
     }).with_columns(pl.col('time').str.to_datetime())
 
+# values were computed manually and checked
+@pytest.fixture
+def positive_ic_series():
+    return pd.Series([0.04, 0.08, 0.06, 0.10, 0.02])
+    # mean    = 0.060
+    # abs_mean = mean(abs) = 0.060
+    # std     = 0.03162  (ddof=1)
+    # stability = abs(mean)/std = 0.060/0.03162 = approx 1.897
+    # sign    = 1
+    # pct_pos = 1.0
 
-# ── information_coefficient ──────────────────────────────────
+@pytest.fixture
+def negative_ic_series():
+    return pd.Series([-0.04, -0.08, -0.06, -0.10, -0.02])
+    # mean     = -0.060
+    # abs_mean = 0.060
+    # sign     = -1
+    # pct_pos  = 1.0  (should be all positive)
+
+@pytest.fixture
+def mixed_ic_series():
+    return pd.Series([0.10, -0.10, 0.06, -0.06, 0.04])
+    # mean     = 0.008  → sign = 1
+    # abs_mean = mean([0.10, 0.10, 0.06, 0.06, 0.04]) = 0.072
+    # pct_pos on adjusted series: [0.10, -0.10, 0.06, -0.06, 0.04] = 0.6
+
+
+# ------------------------------------------------------
+# information_coefficient
+# ------------------------------------------------------
 def test_ic_perfect_positive(perfect_corr):
     """Should return 1.0 for perfect positive correlation with spearman corr_method."""
     x, y = perfect_corr
@@ -72,7 +102,9 @@ def test_ic_invalid_method_raises():
         information_coefficient(x, x, corr_method='kendall')
 
 
-# ── compute_ic ───────────────────────────────────────────────
+# ------------------------------------------------------
+# compute_ic
+# ------------------------------------------------------
 def test_compute_ic_pandas_shape(cross_section_df_pandas):
     """Should return one IC value per date and ic should be one of the two columns."""
     result = compute_ic(cross_section_df_pandas, 'feature', 'target')
@@ -122,3 +154,85 @@ def test_compute_ic_custom_ic_column(cross_section_df_pandas):
     """Should return custom ic column name correctly."""
     result = compute_ic(cross_section_df_pandas, 'feature', 'target', ic_column='my_ic')
     assert 'my_ic' in result.columns
+
+
+# ------------------------------------------------------
+# ICMetrics and compute_ic_metrics
+# ------------------------------------------------------
+def test_ic_metrics_mean_preserves_sign(positive_ic_series, negative_ic_series):
+    """Should preserve sign in mean."""
+    assert compute_ic_metrics(positive_ic_series).mean > 0
+    assert compute_ic_metrics(negative_ic_series).mean < 0
+
+def test_ic_metrics_abs_mean_always_positive(negative_ic_series):
+    """Should return positive abs_mean for negative IC series."""
+    assert compute_ic_metrics(negative_ic_series).abs_mean > 0
+
+def test_ic_metrics_sign_positive_series(positive_ic_series):
+    """Should return sign=1 for positive IC series."""
+    assert compute_ic_metrics(positive_ic_series).sign == 1
+
+def test_ic_metrics_sign_negative_series(negative_ic_series):
+    """Should return sign=-1 for negative IC series."""
+    assert compute_ic_metrics(negative_ic_series).sign == -1
+
+def test_ic_metrics_sign_zero_mean():
+    """Should return sign=1 when mean IC is exactly zero."""
+    series = pd.Series([0.1, -0.1, 0.1, -0.1])
+    assert compute_ic_metrics(series).sign == 1
+
+def test_ic_metrics_stability_is_nan_when_std_zero():
+    """Should return nan stability when all IC values are identical."""
+    series = pd.Series([0.05, 0.05, 0.05])
+    assert np.isnan(compute_ic_metrics(series).stability)
+
+def test_ic_metrics_pct_positive_on_adjusted_series(negative_ic_series):
+    """pct_positive should be high for consistently negative IC (adjusted series)."""
+    metrics = compute_ic_metrics(negative_ic_series)
+    assert metrics.pct_positive == pytest.approx(1.0)
+
+def test_ic_metrics_pct_positive_mixed(mixed_ic_series):
+    """Should return 0.6 for mixed series."""
+    assert compute_ic_metrics(mixed_ic_series).pct_positive == pytest.approx(0.6)
+
+def test_ic_metrics_quantiles_ordered(negative_ic_series):
+    """Should return q25 <= q50 <= q75 for negative IC (adjusted series)."""
+    q = compute_ic_metrics(negative_ic_series).quantiles
+    assert q['q25'] <= q['q50'] <= q['q75']
+
+def test_ic_metrics_adjusted_series_positive_for_negative_input(negative_ic_series):
+    """Adjusted series should be all positive for consistently negative IC."""
+    metrics = compute_ic_metrics(negative_ic_series)
+    assert (metrics.adjusted_series > 0).all()
+
+def test_ic_metrics_original_series_unchanged(negative_ic_series):
+    """Original series should stay negative for consistently negative IC."""
+    metrics = compute_ic_metrics(negative_ic_series)
+    assert (metrics.original_series < 0).all()
+
+# Specific values tests as presented on fixtures
+def test_ic_metrics_mean_value_on_positive_series(positive_ic_series):
+    """Should compute mean correctly."""
+    assert compute_ic_metrics(positive_ic_series).mean == pytest.approx(0.060)
+
+def test_ic_metrics_mean_value_on_negative_series(negative_ic_series):
+    """Should compute mean correctly."""
+    assert compute_ic_metrics(negative_ic_series).mean == pytest.approx(-0.060)
+
+def test_ic_metrics_abs_mean_is_mean_of_abs(mixed_ic_series):
+    """abs_mean should be mean(abs(IC)), not abs(mean(IC))."""
+    assert compute_ic_metrics(mixed_ic_series).abs_mean == pytest.approx(0.072)
+
+def test_ic_metrics_abs_mean_differs_from_abs_of_mean(mixed_ic_series):
+    """abs_mean and abs(mean) should differ for mixed series."""
+    metrics = compute_ic_metrics(mixed_ic_series)
+    assert metrics.abs_mean != pytest.approx(abs(metrics.mean))
+
+def test_ic_metrics_std_value(positive_ic_series):
+    """Should compute sample std correctly (ddof=1)."""
+    assert compute_ic_metrics(positive_ic_series).std == pytest.approx(0.03162, rel=1e-3)
+
+def test_ic_metrics_stability_formula(positive_ic_series):
+    """Should compute stability metric correctly."""
+    metrics = compute_ic_metrics(positive_ic_series)
+    assert metrics.stability == pytest.approx(1.897, rel=1e-3)
