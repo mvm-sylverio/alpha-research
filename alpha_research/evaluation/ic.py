@@ -7,6 +7,8 @@ from typing import Literal
 
 from scipy.stats import pearsonr, spearmanr
 
+from alpha_research.evaluation.statistical_tests import newey_west_tstat
+
 
 def information_coefficient(
         x: pd.Series | pl.Series,
@@ -38,6 +40,11 @@ def information_coefficient(
     ------
     ValueError
         If len(x) != len(y) or corr_method is invalid.
+
+    Notes
+    -----
+    Returns nan if either input is constant (undefined correlation).
+    scipy will emit a ConstantInputWarning in this case, which is intentional.
     """
 
     if len(x) != len(y):
@@ -183,7 +190,7 @@ def compute_ic(
     Returns
     -------
     pd.DataFrame | pl.DataFrame
-        Clean df[[date_column, feature, target, ic_column]] with values sorted by date_column.
+        Clean DataFrame with columns [date_column, ic_column] with values sorted by date_column.
 
     Raises
     ------
@@ -273,18 +280,38 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     """
 
     ic_arr = ic_series.to_numpy()  # to_numpy unifies treatment of the code below
+
+    # guard for empty or all-nan series
+    if len(ic_arr) == 0 or np.all(np.isnan(ic_arr)):
+        return ICMetrics(
+            mean=np.nan,
+            abs_mean=np.nan,
+            sign=1,
+            std=np.nan,
+            stability=np.nan,
+            pct_positive=np.nan,
+            quantiles={'q25': np.nan, 'q50': np.nan, 'q75': np.nan},
+            original_series=ic_series,
+            adjusted_series=ic_series,
+        )
+
     ic_mean = np.mean(ic_arr)
     ic_std = np.std(ic_arr, ddof=1)  # ddof=1 -> sample
 
-    ic_sign = np.sign(ic_mean)
+    # corrections for floating-point precision that will not return 0 when should
+    ic_mean_is_zero = np.isclose(ic_mean, 0, 1e-8)
+    ic_std_is_zero = np.isclose(ic_std, 0, atol=1e-8)
+
+    # sign adjustments
+    ic_sign = np.sign(ic_mean) if not ic_mean_is_zero else 1
     adjusted_arr = ic_sign * ic_arr
 
     return ICMetrics(
         mean=float(ic_mean),
-        abs_mean=float(abs(ic_mean)),
-        sign=ic_sign if ic_mean != 0 else 1,
+        abs_mean=float(np.mean(np.abs(ic_arr))),
+        sign=int(ic_sign),
         std=float(ic_std),
-        stability= float(abs(ic_mean) / ic_std) if ic_std > 0 else np.nan,
+        stability=float(abs(ic_mean) / ic_std) if not ic_std_is_zero else np.nan,
         pct_positive=float(np.mean(adjusted_arr > 0)),
         quantiles={
             'q25': np.quantile(adjusted_arr, 0.25),
@@ -295,6 +322,94 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
         adjusted_series=ic_series * ic_sign
     )
 
+
+def ic_summary_table(
+        df: pd.DataFrame | pl.DataFrame,
+        feature_list: list[str],
+        target: str,
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        date_column: str = 'time',
+        feature_groups: dict[str, str] | None = None,
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Compute the information coefficient (IC) between every feature in feature_list and the target.
+    Compute the Newey-West t-statistic and metrics for the IC of every feature in feature_list.
+    Builds a table with the summarized results compilated and the classification of each feature
+    as defined by the user.
+
+    Adopts the Newey West t-statistics because the ic time series usually violate the i.i.d assumption.
+    For more explanations, see newey_west_tstat docstring.
+
+    Parameters
+    ----------
+    df : pd.DataFrame or pl.DataFrame
+        df where the ic computation will be applied, which contains all the columns in 'feature_list',
+        the 'target' and 'date_column' columns.
+    feature_list : list[str]
+        Column names of the Signals vector Series in the df (e.g. ['factor_A', 'factor_B', ...]).
+    target : str
+        Column name of the Target vector Series in the df (e.g. 'fwd_ret_5').
+    corr_method : {'spearman', 'pearson'}
+        Spearman captures monotonic relationships (default).
+        Pearson assumes linearity.
+    date_column : str
+        String name of the date column in df (default = 'time').
+    feature_groups : dict[str, str] | None
+        Dict defined by the user with the group name of each feature.
+        Useful for the application of the Benjamini-Hochberg test for the correction of
+        multiple features and control of false positives.
+        All features are labeled 'ungrouped' if feature_groups is not provided.
+        A feature is also labeled 'ungrouped' if its group is not found on feature_groups.
+
+    Returns
+    -------
+    pd.DataFrame | pl.DataFrame
+        Pandas or Polars DataFrame with the features, its group, respective ic metrics and
+        the t-stat results.
+    """
+    # Guard against empty list
+    if not feature_list:
+        raise ValueError("feature_list must not be empty.")
+
+    rows = []
+
+    for feature in feature_list:
+        # the existence of the column on the df is already checked on compute_ic
+        df_ic = compute_ic(df, feature, target, corr_method, date_column)
+        ic_series = df_ic['ic']  # internal usage adopts default ic_column name
+
+        # ic metrics
+        metrics = compute_ic_metrics(ic_series)  # default option for ic column name
+
+        # t stat of the ic
+        nw_test = newey_west_tstat(ic_series)
+
+        # parsing feature_group of the feature
+        if feature_groups is not None:
+            feature_group = feature_groups.get(feature, 'ungrouped')
+        else:
+            feature_group = 'ungrouped'
+
+        rows.append({
+            'feature': feature,
+            'mean': metrics.mean,
+            'abs_mean': metrics.abs_mean,
+            'sign': metrics.sign,
+            'std': metrics.std,
+            'stability': metrics.stability,
+            'pct_positive': metrics.pct_positive,
+            'quantile25': metrics.quantiles['q25'],
+            'quantile50': metrics.quantiles['q50'],
+            'quantile75': metrics.quantiles['q75'],
+            't_stat': nw_test.t_stat,
+            'p_value':nw_test.p_value,
+            'feature_group': feature_group,
+        })
+
+    if isinstance(df, pd.DataFrame):
+        return pd.DataFrame(rows)
+    else:  # type already checked when calling compute_ic, else means pl.DataFrame
+        return pl.DataFrame(rows)
 
 # --------------------------
 # Plots
