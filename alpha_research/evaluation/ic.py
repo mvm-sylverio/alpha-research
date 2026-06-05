@@ -273,6 +273,21 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     """
 
     ic_arr = ic_series.to_numpy()  # to_numpy unifies treatment of the code below
+
+    # guard for empty or all-nan series
+    if len(ic_arr) == 0 or np.all(np.isnan(ic_arr)):
+        return ICMetrics(
+            mean=np.nan,
+            abs_mean=np.nan,
+            sign=1,
+            std=np.nan,
+            stability=np.nan,
+            pct_positive=np.nan,
+            quantiles={'q25': np.nan, 'q50': np.nan, 'q75': np.nan},
+            original_series=ic_series,
+            adjusted_series=ic_series,
+        )
+
     ic_mean = np.mean(ic_arr)
     ic_std = np.std(ic_arr, ddof=1)  # ddof=1 -> sample
 
