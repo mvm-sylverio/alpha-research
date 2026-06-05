@@ -38,6 +38,11 @@ def information_coefficient(
     ------
     ValueError
         If len(x) != len(y) or corr_method is invalid.
+
+    Notes
+    -----
+    Returns nan if either input is constant (undefined correlation).
+    scipy will emit a ConstantInputWarning in this case, which is intentional.
     """
 
     if len(x) != len(y):
@@ -183,7 +188,7 @@ def compute_ic(
     Returns
     -------
     pd.DataFrame | pl.DataFrame
-        Clean df[[date_column, feature, target, ic_column]] with values sorted by date_column.
+        Clean DataFrame with columns [date_column, ic_column] with values sorted by date_column.
 
     Raises
     ------
