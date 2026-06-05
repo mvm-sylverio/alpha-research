@@ -101,3 +101,16 @@ def test_nw_pandas_polars_consistency(strong_positive_ic_series):
     res_pl = newey_west_tstat(pl_series)
     assert res_pd.t_stat == pytest.approx(res_pl.t_stat, rel=1e-6)
     assert res_pd.p_value == pytest.approx(res_pl.p_value, rel=1e-6)
+
+# tests for empty or all nan ic series
+def test_nw_empty_series_returns_nan():
+    """Should return nan for empty series."""
+    result = newey_west_tstat(pd.Series([], dtype=float))
+    assert np.isnan(result.t_stat)
+    assert np.isnan(result.p_value)
+
+def test_nw_all_nan_series_returns_nan():
+    """Should return nan for all-nan series."""
+    result = newey_west_tstat(pd.Series([np.nan, np.nan, np.nan]))
+    assert np.isnan(result.t_stat)
+    assert np.isnan(result.p_value)

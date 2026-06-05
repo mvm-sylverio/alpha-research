@@ -81,6 +81,10 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
 
     ic = ic_series.to_numpy()  # more appropriate for statsmodels
 
+    # guard for empty or all-nan series
+    if len(ic) == 0 or np.all(np.isnan(ic)):
+        return NWTestResult(t_stat=np.nan, p_value=np.nan)
+
     # Constant IC series has zero uncertainty, making the t-stat undefined for practical purposes
     if np.isclose(np.std(ic, ddof=1), 0, atol=1e-8):
         return NWTestResult(t_stat=np.nan, p_value=np.nan)
