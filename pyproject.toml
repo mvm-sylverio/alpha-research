@@ -7,15 +7,22 @@ name = "alpha-research"
 version = "0.1.0"
 description = "Systematic alpha research framework focused on signal discovery, validation, and robustness."
 requires-python = ">=3.11"
+authors = [
+    {name = "Marcos Vinicius M. Sylverio"}
+]
 dependencies = [
     "numpy>=2.0.0",
+    "pandas>=2.0.0",
+    "scipy>=1.10.0",
     "polars>=1.0.0",
-    "statsmodels>=0.14.0",
-    "MetaTrader5>=5.0.0",
+    "statsmodels>=0.14.0"
 ]
 
-authors = [
-    {name = 'Marcos Vinicius M. Sylverio'}
+[project.optional-dependencies]
+mt5 = ["MetaTrader5>=5.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pyarrow>=14.0.0",
 ]
 
 [tool.setuptools.packages.find]
