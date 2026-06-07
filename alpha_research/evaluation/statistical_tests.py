@@ -4,7 +4,11 @@ import polars as pl
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+from statsmodels.tsa.stattools import adfuller
 import math
+
+__all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult']
+
 
 @dataclass(frozen=True, slots=True)
 class NWTestResult:
@@ -102,3 +106,94 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
         t_stat=float(results.tvalues[0]),
         p_value=float(results.pvalues[0])
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ADFTestResult:
+    """
+    Result of ADF test for stationarity of a series.
+
+    Attributes
+    ----------
+    t_stat : float
+        t-statistic for the null hypothesis that there is a unit root = True = non-stationary.
+    p_value : float
+        p-value associated with the t_stat.
+    is_stationary : bool | None
+        p-value tested against the significance_level chosen by the user in adf_test function.
+        True if p_value < significance_level, False otherwise.
+        None if the test could not be performed (constant or short series).
+    used_lags : int | None
+        Effective number of lags used by adfuller.
+    """
+    t_stat: float
+    p_value: float
+    is_stationary: bool | None
+    used_lags: int | None
+
+def adf_test(
+        series: pd.Series | pl.Series,
+        significance_level: float = 0.05,
+        minimum_observations: int = 20
+) -> ADFTestResult:
+    """
+    Compute the ADF test to check the stationarity of a series.
+
+    Assumes the default values of maxlag and autolag for the adfuller statsmodels function.
+
+    Why is this necessary?
+    ----------------------
+    Feature research requires stationary series. Feature usually need to be tested to garantee
+    minimum stationarity.
+
+    Parameters
+    ----------
+    series : pd.Series | pl.Series
+        Series which will be tested for stationarity.
+    significance_level : float
+        Significance level in which the resulted p-value will be tested against.
+    minimum_observations : int
+        Minimum number of non-nan observations to garantee test robustness.
+
+    Returns
+    -------
+    ADFTestResult
+        t-statistic for the stationarity of the series, associated p-value, the test result
+        based on the significance_level adopted and the number of lags used by adfuller.
+
+    Notes
+    -----
+    The null hypothesis is that there is a unit root (non-stationary series).
+
+    The ADF test is a left-tailed unit root test.
+
+    The statsmodels adfuller function returns additional data, in different order, when store=True.
+    This function always uses the default store=False. Under this configuration, adfuller always return
+    t-stat, p-value and used_lags in consistent order.
+    """
+    np_series = series.to_numpy()  # more appropriate for statsmodels
+    np_series = np_series[~np.isnan(np_series)]  # clean array
+
+    # inital checks - minimum length and constant series
+    if len(np_series) < minimum_observations:
+        raise ValueError(f'Series is too short for a valid ADF test: {len(series)} < {minimum_observations}')
+
+    if np.isclose(np.std(np_series, ddof=1), 0, atol=1e-8):
+        return ADFTestResult(t_stat=np.nan, p_value=np.nan, is_stationary=None, used_lags=None)
+
+    t_stat, p_value, used_lags, *_ = adfuller(np_series)  # only first three returns are required in this function
+
+    return ADFTestResult(
+        t_stat=float(t_stat),
+        p_value=float(p_value),
+        is_stationary=bool(p_value < significance_level),
+        used_lags=int(used_lags)
+    )
+
+def stationarity_test(
+        series: pd.Series | pl.Series,
+        significance_level: float = 0.05,
+        minimum_observations: int = 20
+) -> ADFTestResult:
+    """Alias for function adf_test. See its documentation for full details."""
+    return adf_test(series, significance_level, minimum_observations)
