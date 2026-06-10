@@ -9,6 +9,8 @@ from scipy.stats import pearsonr, spearmanr
 
 from alpha_research.evaluation.statistical_tests import newey_west_tstat
 
+__all__ = ['information_coefficient', 'compute_ic', 'ICMetrics', 'compute_ic_metrics', 'ic_summary_table']
+
 
 def information_coefficient(
         x: pd.Series | pl.Series,
@@ -67,32 +69,9 @@ def _compute_ic_pandas(
         ic_column='ic',
 ) -> pd.DataFrame:
     """
-    Compute the Information Coefficient (IC) between two columns of a pandas DataFrame.
-
-    Uses the information_coefficient function.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        df where the ic computation will be applied, which contains the 'feature', 'target', 'date_column' columns.
-    feature : str
-        Column name of the Signal vector Series in the df (e.g. 'factor_A').
-    target : str
-        Column name of the Target vector Series in the df (e.g. 'fwd_ret_5').
-    corr_method : {'spearman', 'pearson'}
-        Spearman captures monotonic relationships (default).
-        Pearson assumes linearity.
-    date_column : str
-        String name of the date column in df (default = 'time').
-    ic_column : str
-        String name of the new column in df with the computed ic values.
-
-    Returns
-    -------
-    pd.DataFrame
-        Clean DataFrame with columns [date_column, ic_column], sorted by date_column.
+    Core pandas implementation of compute_ic.
+    See compute_ic() for full documentation.
     """
-
     sub = df[[date_column, feature, target]].dropna()
 
     ic_by_date = (sub.groupby(date_column)[[feature, target]]
@@ -115,32 +94,9 @@ def _compute_ic_polars(
         ic_column='ic',
 ) -> pl.DataFrame:
     """
-    Compute the Information Coefficient (IC) between two columns of a polars DataFrame.
-
-    Uses the internal polars corr function.
-
-    Parameters
-    ----------
-    df : pl.DataFrame
-        df where the ic computation will be applied, which contains the 'feature', 'target', 'date_column' columns.
-    feature : str
-        Column name of the Signal vector Series in the df (e.g. 'factor_A').
-    target : str
-        Column name of the Target vector Series in the df (e.g. 'fwd_ret_5').
-    corr_method : {'spearman', 'pearson'}
-        Spearman captures monotonic relationships (default).
-        Pearson assumes linearity.
-    date_column : str
-        String name of the date column in df (default = 'time').
-    ic_column : str
-        String name of the new column in df with the computed ic values.
-
-    Returns
-    -------
-    pl.DataFrame
-        Clean DataFrame with columns [date_column, ic_column], sorted by date_column.
+    Core polars implementation of compute_ic.
+    See compute_ic() for full documentation.
     """
-
     df_ic = df[[date_column, feature, target]].drop_nulls()
 
     # group by time
@@ -200,7 +156,7 @@ def compute_ic(
         If df is not pandas or polars type.
     """
     if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
-        raise ValueError('df must be Pandas or Polars type.')
+        raise TypeError('df must be Pandas or Polars DataFrame.')
 
     # Initial checks - already checked for DataFrame format before
     if date_column not in df.columns:

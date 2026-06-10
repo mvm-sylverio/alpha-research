@@ -168,7 +168,7 @@ def test_compute_ic_missing_column_raises(cross_section_df_pandas):
 
 def test_compute_ic_invalid_df_raises():
     """Should raise ValueError with unsupported input types."""
-    with pytest.raises(ValueError, match="Pandas or Polars"):
+    with pytest.raises(TypeError, match="Pandas or Polars"):
         compute_ic([[1, 2], [3, 4]], 'feature', 'target')
 
 def test_compute_ic_custom_ic_column(cross_section_df_pandas):
