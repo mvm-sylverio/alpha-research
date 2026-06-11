@@ -10,6 +10,9 @@ import math
 __all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult']
 
 
+# ------------------------------------------------------
+# Newey-West test
+# ------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class NWTestResult:
     """
@@ -108,6 +111,9 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
     )
 
 
+# ------------------------------------------------------
+# ADF test - Stationarity test
+# ------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class ADFTestResult:
     """
@@ -143,7 +149,7 @@ def adf_test(
 
     Why is this necessary?
     ----------------------
-    Feature research requires stationary series. Feature usually need to be tested to garantee
+    Feature research usually improves with stationary series. Feature usually need to be tested to garantee
     minimum stationarity.
 
     Parameters
@@ -195,5 +201,8 @@ def stationarity_test(
         significance_level: float = 0.05,
         minimum_observations: int = 20
 ) -> ADFTestResult:
-    """Alias for function adf_test. See its documentation for full details."""
+    """
+    Alias for function adf_test.
+    See adf_test() for full documentation.
+    """
     return adf_test(series, significance_level, minimum_observations)
