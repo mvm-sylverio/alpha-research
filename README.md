@@ -9,37 +9,28 @@ Inspired by concepts from:
 
 ## Stack
 
-Python - Pandas - Polars - NumPy - Scikit-learn
+Python - Pandas - Polars - NumPy - Scipy - Statsmodels
 
-Both Pandas and Polars are accept as backends. Pandas is accepted because of its widespread usage in the community and Polars for its performance for bigger tasks. Pandas is adopted without index, like polars.
+Both Pandas and Polars are supported as backends. Pandas is supported because of its widespread usage in the community and Polars for its performance for bigger tasks. Pandas is treated without index, like polars.
 
 ## Pipeline
 Completed modules are marked; remaining items reflect the planned roadmap.
 
 ### Pre-Research
-- [ ] Data ingestion and cleaning
+- [ ] Data ingestion
+- [ ] Data cleaning
 - [ ] Volume bars / dollar bars
 - [ ] Exploratory data analysis (EDA)
-- [ ] Feature engineering
-- [ ] Outlier winsorization
-- [ ] Stationarity testing (ADF)
-- [ ] Fractional differentiation for non-stationary features
+- [ ] Feature engineering and preprocessing - continuous implementation - basic are tracked here
+  - [ ] Raw features
+  - [ ] Refined features
+  - [ ] Transformations
+- [x] Stationarity testing (ADF) - for time-series models and fractional differentiation
 - [ ] Triple Barrier Method (labeling)
 - [ ] Event-based sampling (CUSUM filter)
 
 ### Research — "Does the signal exist?"
-
-**Causality — "Is the signal real or spurious?"**
-
-Fully exploratory. Runs on the full dataset before any fold construction.
-- [ ] Granger causality — linear filter
-- [ ] PCMCI — causal discovery with multiple confounders
-- [ ] Transfer entropy — non-linear relationships
-
-**Purged K-Fold construction**
-- [ ] K-fold split with purging and embargo (López de Prado)
-- [ ] Embargo length defined by IC decay horizon
-- [ ] All decision-informing analyses restricted to train folds
+Ideally, should be done on 80-90% of the dataset. 10-20% should be reserved for validation and never used on research.
 
 **Foundation — IC Analysis**
 - [x] Cross-sectional Information Coefficient (IC) — Spearman and Pearson
@@ -50,7 +41,21 @@ Fully exploratory. Runs on the full dataset before any fold construction.
 - [ ] IC decay analysis
 
 **Multiple Testing Correction**
-- [ ] Benjamini-Hochberg correction per signal family
+- [x] Benjamini-Hochberg correction per signal family
+- [x] Benjamini-Yekutieli correction for arbitrary dependence
+
+**Causality — "Is the signal real or spurious? Why does it work?"**
+
+Causality is treated as confirmatory evidence, not an exclusion criterion -
+many robust predictive signals in financial markets lack a fully identified
+causal mechanism.
+
+- [ ] Granger causality — linear filter
+- [ ] PCMCI — causal discovery with multiple confounders
+- [ ] Transfer entropy — non-linear relationships
+
+**Purged K-Fold construction**
+- [ ] K-fold split with purging and embargo (López de Prado)
 
 **Structure — "Are features redundant?"**
 - [ ] Feature correlation matrix
@@ -70,12 +75,18 @@ Fully exploratory. Runs on the full dataset before any fold construction.
 - [ ] Hidden Markov Model (HMM) — latent volatility/return states
 - [ ] Changepoint detection — structural distribution shifts
 - [ ] Regime clustering (K-means on volatility and correlation features)
-- [ ] Regime as meta-feature entering Purged K-Fold
+- [ ] Regime as meta-feature
 
 **Advanced**
 - [ ] Signature features (Rough Path Theory)
 - [ ] Topological Data Analysis (TDA) — persistent homology
 - [ ] Hawkes processes — temporal event clustering
+
+### Out-of-Sample Validation
+Final validation on the held-out period defined at the start of research.
+- [ ] Expanding window walk-forward
+- [ ] IC stability check out-of-sample
+- [ ] Factor regression — residual alpha with t-stat > 2
 
 ### Backtesting
 - [ ] Cross-sectional portfolio construction
@@ -92,6 +103,7 @@ Fully exploratory. Runs on the full dataset before any fold construction.
 ```python
 import pandas as pd
 from alpha_research.evaluation.ic import compute_ic, ic_summary_table
+from alpha_research.evaluation.statistical_tests import benjamini_hochberg
 
 df = pd.DataFrame()  # or pl.DataFrame
 
@@ -111,4 +123,9 @@ table = ic_summary_table(
     target="fwd_ret_10",
     feature_groups=feature_groups,
 )
+
+# Apply FDR correction per signal family with Benjamini-Hochberg correction
+fdr_corrected_table = benjamini_hochberg(table)
+
+significant_features = fdr_corrected_table[fdr_corrected_table['fdr_rejected']]
 ```
