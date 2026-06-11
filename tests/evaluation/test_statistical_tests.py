@@ -4,7 +4,8 @@ import polars as pl
 import numpy as np
 
 from alpha_research.evaluation.statistical_tests import (newey_west_tstat, NWTestResult, adf_test, ADFTestResult,
-                                                         stationarity_test)
+                                                         stationarity_test, fdr_correction, benjamini_hochberg,
+                                                         benjamini_yekutieli)
 
 
 # ------------------------------------------------------
@@ -87,6 +88,53 @@ def series_with_many_nans():
     arr = np.full(100, np.nan)
     arr[:10] = np.linspace(0, 1, 10)
     return pd.Series(arr)
+
+@pytest.fixture
+def single_group_table():
+    """
+    ic_summary_table output with single group.
+    p_values chosen so that some pass and some fail at fdr=0.05.
+    """
+    return pd.DataFrame({
+        'feature':       ['f1', 'f2', 'f3', 'f4', 'f5'],
+        'p_value':       [0.001, 0.008, 0.039, 0.041, 0.200],
+        'feature_group': ['momentum'] * 5,
+        'mean':          [0.05, 0.04, 0.03, 0.02, 0.01],
+    })
+
+@pytest.fixture
+def multi_group_table():
+    """
+    ic_summary_table output with two groups.
+    BH applied independently per group.
+    """
+    return pd.DataFrame({
+        'feature':       ['f1', 'f2', 'f3', 'f4', 'f5', 'f6'],
+        'p_value':       [0.001, 0.008, 0.200, 0.001, 0.008, 0.200],
+        'feature_group': ['momentum', 'momentum', 'momentum',
+                          'reversal', 'reversal', 'reversal'],
+        'mean':          [0.05, 0.04, 0.01, 0.05, 0.04, 0.01],
+    })
+
+@pytest.fixture
+def all_significant_table():
+    """All p_values clearly below threshold."""
+    return pd.DataFrame({
+        'feature':       ['f1', 'f2', 'f3'],
+        'p_value':       [0.001, 0.002, 0.003],
+        'feature_group': ['momentum'] * 3,
+        'mean':          [0.05, 0.04, 0.03],
+    })
+
+@pytest.fixture
+def none_significant_table():
+    """All p_values clearly above threshold."""
+    return pd.DataFrame({
+        'feature':       ['f1', 'f2', 'f3'],
+        'p_value':       [0.300, 0.400, 0.500],
+        'feature_group': ['momentum'] * 3,
+        'mean':          [0.01, 0.01, 0.01],
+    })
 
 
 # ------------------------------------------------------
@@ -251,3 +299,108 @@ def test_stationarity_test_is_alias(stationary_series):
     assert res_adf.p_value == pytest.approx(res_alias.p_value)
     assert res_adf.is_stationary == res_alias.is_stationary
     assert res_adf.used_lags == res_alias.used_lags
+
+
+# ------------------------------------------------------
+# FDR correction and aliases
+# ------------------------------------------------------
+# structure
+def test_fdr_returns_dataframe_and_output_columns(single_group_table):
+    """Should return pandas DataFrame and fdr_rejected and fdr_corrected_p_value columns."""
+    result = fdr_correction(single_group_table)
+    assert isinstance(result, pd.DataFrame)
+    assert 'fdr_rejected' in result.columns
+    assert 'fdr_corrected_p_value' in result.columns
+
+def test_fdr_preserves_input_columns_and_row_count(single_group_table):
+    """Should preserve all original columns of df and same number of rows as input."""
+    result = fdr_correction(single_group_table)
+    for col in single_group_table.columns:
+        assert col in result.columns
+    assert len(result) == len(single_group_table)
+
+def test_fdr_does_not_mutate_input(single_group_table):
+    """Should not modify the original DataFrame - columns and values."""
+    original = single_group_table.copy()
+    fdr_correction(single_group_table)
+    pd.testing.assert_frame_equal(single_group_table, original)
+
+# results
+def test_fdr_all_significant(all_significant_table):
+    """All clearly significant p_values should all be rejected=True."""
+    result = fdr_correction(all_significant_table)
+    assert result['fdr_rejected'].all()
+
+def test_fdr_none_significant(none_significant_table):
+    """All clearly non-significant p_values should be rejected=False."""
+    result = fdr_correction(none_significant_table)
+    assert not result['fdr_rejected'].any()
+
+def test_fdr_corrected_pvalues_geq_original(single_group_table):
+    """Corrected p_values should always be >= original p_values."""
+    result = fdr_correction(single_group_table)
+    assert (result['fdr_corrected_p_value'] >= result['p_value']).all()
+
+def test_fdr_corrected_pvalues_in_valid_range(single_group_table):
+    """Corrected p_values should be in [0, 1]."""
+    result = fdr_correction(single_group_table)
+    assert (result['fdr_corrected_p_value'] >= 0).all()
+    assert (result['fdr_corrected_p_value'] <= 1).all()
+
+# groups
+def test_fdr_applied_per_group(multi_group_table):
+    """BH should be applied independently per group — same p_values in different groups should yield same results."""
+    result = fdr_correction(multi_group_table)
+    momentum = result[result['feature_group'] == 'momentum']
+    reversal = result[result['feature_group'] == 'reversal']
+    assert list(momentum['fdr_rejected']) == list(reversal['fdr_rejected'])
+    assert momentum['fdr_corrected_p_value'].values == pytest.approx(
+        reversal['fdr_corrected_p_value'].values, abs=1e-8)
+
+# raises
+def test_fdr_missing_column_raises(single_group_table):
+    """Should raise KeyError if required columns are missing."""
+    df = single_group_table.drop(columns=['p_value'])
+    with pytest.raises(KeyError):
+        fdr_correction(df)
+
+def test_fdr_invalid_type_raises():
+    """Should raise TypeError for unsupported input types."""
+    with pytest.raises(TypeError):
+        fdr_correction([[1, 2], [3, 4]])
+
+# BH vs BY
+def test_fdr_by_more_conservative_than_bh(single_group_table):
+    """
+    BY should reject fewer or equal features than BH.
+    BY should have corrected p-values equal or higher than BH.
+    """
+    result_bh = fdr_correction(single_group_table, method='bh')
+    result_by = fdr_correction(single_group_table, method='by')
+    assert result_by['fdr_rejected'].sum() <= result_bh['fdr_rejected'].sum()
+    assert (result_by['fdr_corrected_p_value'] >= result_bh['fdr_corrected_p_value']).all()
+
+# aliases
+def test_benjamini_hochberg_alias(single_group_table):
+    """benjamini_hochberg should return identical results to fdr_correction with method='bh'."""
+    res_alias = benjamini_hochberg(single_group_table)
+    res_direct = fdr_correction(single_group_table, method='bh')
+    pd.testing.assert_frame_equal(res_alias, res_direct)
+
+def test_benjamini_yekutieli_alias(single_group_table):
+    """benjamini_yekutieli should return identical results to fdr_correction with method='by'."""
+    res_alias = benjamini_yekutieli(single_group_table)
+    res_direct = fdr_correction(single_group_table, method='by')
+    pd.testing.assert_frame_equal(res_alias, res_direct)
+
+# pandas / polars consistency
+def test_fdr_pandas_polars_consistency(single_group_table):
+    """Should return identical results for pandas and polars input."""
+    pl_table = pl.from_pandas(single_group_table)
+    res_pd = fdr_correction(single_group_table)
+    res_pl = fdr_correction(pl_table).to_pandas()
+    pd.testing.assert_frame_equal(
+        res_pd.reset_index(drop=True),
+        res_pl.reset_index(drop=True),
+        check_dtype=False
+    )

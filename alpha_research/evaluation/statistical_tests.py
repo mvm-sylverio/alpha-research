@@ -1,13 +1,16 @@
 from dataclasses import dataclass
+from typing import Literal
 
 import polars as pl
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller
+from statsmodels.stats.multitest import multipletests
 import math
 
-__all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult']
+__all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult', 'fdr_correction',
+           'benjamini_hochberg', 'benjamini_yekutieli']
 
 
 # ------------------------------------------------------
@@ -206,3 +209,131 @@ def stationarity_test(
     See adf_test() for full documentation.
     """
     return adf_test(series, significance_level, minimum_observations)
+
+
+# ------------------------------------------------------
+# FDR correction - BH and BY
+# ------------------------------------------------------
+def _fdr_correction_pandas(
+        df: pd.DataFrame,
+        fdr: float = 0.05,
+        method: Literal['bh', 'by'] = 'bh'
+) -> pd.DataFrame:
+    """
+    Core pandas implementation of fdr_correction.
+    See fdr_correction() for full documentation.
+    """
+    df = df.copy()  # mutable array in pandas - requires copy.
+
+    # get all group names in df['feature_group']
+    groups = np.unique(df['feature_group'].to_numpy())
+
+    for group in groups:
+        mask = df['feature_group'] == group
+
+        p_values = np.asarray(df.loc[mask, 'p_value'])
+
+        rejected, corrected_p_values, *_ = multipletests(pvals=p_values, alpha=fdr, method=f'fdr_{method}')
+
+        df.loc[mask, 'fdr_rejected'] = rejected  # True = passed fdr correction = signal is significant
+        df.loc[mask, 'fdr_corrected_p_value'] = corrected_p_values
+
+    return df
+
+def fdr_correction(
+        df: pd.DataFrame | pl.DataFrame,
+        fdr: float = 0.05,
+        method: Literal['bh', 'by'] = 'bh'
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Apply the FDR correction (Benjamini-Hochberg - BH or Benjamini-Yekutieli - BY)
+    on the result pandas DataFrame of ic.ic_summary_table.
+
+    FDR correction is applied independently per feature_group.
+    If all features share the same group (e.g. 'ungrouped', the default in
+    ic_summary_table), correction runs once across all features, equivalent
+    to a global FDR correction.
+
+    Why is this necessary?
+    ----------------------
+    Multiple tries in feature generation may produce significant signals by chance.
+    FDR correction removes most of the false positives while maximizing the gain of
+    information with the features.
+
+    BH and BY adopts a different philosophy than the more usual Benferroni, which tries
+    to null the false positives, but possibly losing valuable information on the process.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        df returned by ic.ic_summary_table with columns ['p_value', 'feature_group'].
+    fdr : float
+        significance level in which the corrected p-values will be tested against.
+    method : {'bh', 'by'}
+        bh = Benjamini-Hochberg correction - for independent or positive
+        correlated tries.
+        by = Benjamini-Yekutieli correction - for arbitrary dependence, including
+        negative correlation. More conservative than BH.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with all the columns given by ic.ic_summary_table and additional
+        ['fdr_rejected', 'fdr_corrected_p_values'] columns with the results from the
+        FDR correction.
+
+    Raises
+    ------
+    KeyError
+        If p_value, feature_group are not columns of the df.
+    ValueError
+        If df is not pandas or polars type.
+
+    Notes
+    -----
+    Summary tables should not have different run performance in polars
+    and pandas. Therefore, everything is transformed to pandas for code simplicity.
+    """
+    # Initial checks on columns
+    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
+        raise TypeError('df must be Pandas or Polars DataFrame.')
+
+    if any(col not in df.columns for col in ['p_value', 'feature_group']):
+        raise KeyError(f"df must have both 'p_value' and 'feature_group' columns.")
+
+    if isinstance(df, pd.DataFrame):
+        return _fdr_correction_pandas(df, fdr, method)
+    else:  # pl.Dataframe type
+        return pl.from_pandas(_fdr_correction_pandas(df.to_pandas(), fdr, method))
+
+def benjamini_hochberg(
+        df: pd.DataFrame | pl.DataFrame,
+        fdr: float = 0.05,
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Apply Benjamini-Hochberg FDR correction per feature group.
+
+    Alias for fdr_correction() with method='bh'. Assumes independence or positive
+    correlation between tests within the same group.
+
+    For arbitrary dependence, use benjamini_yekutieli().
+
+    See fdr_correction() for full documentation.
+    """
+    return fdr_correction(df, fdr, 'bh')
+
+def benjamini_yekutieli(
+        df: pd.DataFrame | pl.DataFrame,
+        fdr: float = 0.05,
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Apply Benjamini-Yekutieli FDR correction per feature group.
+
+    Alias for fdr_correction() with method='by'. Valid under arbitrary
+    dependence between tests, including negative correlation.
+
+    More conservative than benjamini_hochberg().
+
+    See fdr_correction() for full documentation.
+    """
+    return fdr_correction(df, fdr, 'by')
