@@ -8,6 +8,7 @@ from typing import Literal
 from scipy.stats import pearsonr, spearmanr
 
 from alpha_research.evaluation.statistical_tests import newey_west_tstat
+from alpha_research._utils import _validate_df
 
 __all__ = ['information_coefficient', 'compute_ic', 'ICMetrics', 'compute_ic_metrics', 'ic_summary_table']
 
@@ -125,7 +126,8 @@ def compute_ic(
     """
     Compute the Information Coefficient (IC) between two columns of a pandas or polars DataFrame.
 
-    Dispatches to _compute_ic_pandas or _compute_ic_polars based on df type.
+    IC measures the correlation between a signal feature and a target computed cross-sectionally
+    for each date in the DataFrame.
 
     Parameters
     ----------
@@ -152,19 +154,10 @@ def compute_ic(
     ------
     KeyError
         If date_column, feature, target are not columns of the df.
-    ValueError
+    TypeError
         If df is not pandas or polars type.
     """
-    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('df must be Pandas or Polars DataFrame.')
-
-    # Initial checks - already checked for DataFrame format before
-    if date_column not in df.columns:
-        raise KeyError(f'{date_column} is not a column of df.')
-    if feature not in df.columns:
-        raise KeyError(f'{feature} is not a column of df.')
-    if target not in df.columns:
-        raise KeyError(f'{target} is not a column of df.')
+    _validate_df(df, [date_column, feature, target])
 
     if isinstance(df, pd.DataFrame):
         return _compute_ic_pandas(df, feature, target, corr_method, date_column, ic_column)
