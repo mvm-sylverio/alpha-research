@@ -268,7 +268,7 @@ def fdr_correction(
     Parameters
     ----------
     df : pd.DataFrame | pl.DataFrame
-        df returned by ic.ic_summary_table with columns ['p_value', 'feature_group'].
+        DataFrame returned by ic.ic_summary_table with columns ['p_value', 'feature_group'].
     fdr : float
         significance level in which the corrected p-values will be tested against.
     method : {'bh', 'by'}
@@ -288,7 +288,7 @@ def fdr_correction(
     ------
     KeyError
         If p_value, feature_group are not columns of the df.
-    ValueError
+    TypeError
         If df is not pandas or polars type.
 
     Notes
