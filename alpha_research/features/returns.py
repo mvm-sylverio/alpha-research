@@ -4,7 +4,10 @@ import numpy as np
 
 from alpha_research._utils import _validate_df
 
-def compute_simple_returns(
+__all__ = ['simple_returns', 'log_returns']
+
+
+def simple_returns(
         df: pd.DataFrame | pl.DataFrame,
         horizon: int,
         price_col: str = 'close',
@@ -58,7 +61,7 @@ def compute_simple_returns(
             .alias(f'simple_ret_{horizon}')])
 
 
-def compute_log_returns(
+def log_returns(
         df: pd.DataFrame | pl.DataFrame,
         horizon: int,
         price_col: str = 'close',

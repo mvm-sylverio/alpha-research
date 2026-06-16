@@ -3,7 +3,7 @@ import pandas as pd
 import polars as pl
 import numpy as np
 
-from alpha_research.features.returns import compute_simple_returns, compute_log_returns
+from alpha_research.features.returns import simple_returns, log_returns
 
 # ------------------------------------------------------
 # fixtures
@@ -89,18 +89,18 @@ def multi_asset_ohlcv_pandas():
 # output structure
 def test_compute_returns_output_columns(single_asset_ohlcv_pandas):
     """Should return only time, symbol and simple_ret column."""
-    result = compute_simple_returns(single_asset_ohlcv_pandas, horizon=1)
+    result = simple_returns(single_asset_ohlcv_pandas, horizon=1)
     assert set(result.columns) == {'time', 'symbol', 'simple_ret_1'}
 
 def test_compute_returns_output_shape(single_asset_ohlcv_pandas):
     """Should return same number of rows as input."""
-    result = compute_simple_returns(single_asset_ohlcv_pandas, horizon=1)
+    result = simple_returns(single_asset_ohlcv_pandas, horizon=1)
     assert len(result) == len(single_asset_ohlcv_pandas)
 
 # correctness - single asset
 def test_compute_returns_values_horizon_1(single_asset_ohlcv_pandas):
     """Should compute correct simple returns for horizon=1."""
-    result = compute_simple_returns(single_asset_ohlcv_pandas, horizon=1)
+    result = simple_returns(single_asset_ohlcv_pandas, horizon=1)
     expected = [np.nan, 0.10, 0.10, 0.10, 0.10]
     assert np.isnan(result['simple_ret_1'].iloc[0])
     np.testing.assert_allclose(
@@ -111,7 +111,7 @@ def test_compute_returns_values_horizon_1(single_asset_ohlcv_pandas):
 
 def test_compute_returns_values_horizon_2(single_asset_ohlcv_pandas):
     """Should compute correct simple returns for horizon=2."""
-    result = compute_simple_returns(single_asset_ohlcv_pandas, horizon=2)
+    result = simple_returns(single_asset_ohlcv_pandas, horizon=2)
     expected = [np.nan, np.nan, 0.21, 0.21, 0.21]
     assert np.isnan(result['simple_ret_2'].iloc[0]) and np.isnan(result['simple_ret_2'].iloc[1])
     np.testing.assert_allclose(
@@ -123,7 +123,7 @@ def test_compute_returns_values_horizon_2(single_asset_ohlcv_pandas):
 # correctness - multi asset
 def test_compute_returns_multi_asset_no_mixing(multi_asset_ohlcv_pandas):
     """groupby/over must not mix assets - each asset should be computed independently."""
-    result = compute_simple_returns(multi_asset_ohlcv_pandas, horizon=1)
+    result = simple_returns(multi_asset_ohlcv_pandas, horizon=1)
     aapl = result[result['symbol'] == 'AAPL']['simple_ret_1'].values
     msft = result[result['symbol'] == 'MSFT']['simple_ret_1'].values
     assert np.isnan(aapl[0])
@@ -133,7 +133,7 @@ def test_compute_returns_multi_asset_no_mixing(multi_asset_ohlcv_pandas):
 
 def test_compute_returns_multi_asset_horizon_2(multi_asset_ohlcv_pandas):
     """Horizon=2 should use price 2 bars before per asset independently."""
-    result = compute_simple_returns(multi_asset_ohlcv_pandas, horizon=2)
+    result = simple_returns(multi_asset_ohlcv_pandas, horizon=2)
     aapl = result[result['symbol'] == 'AAPL']['simple_ret_2'].values
     msft = result[result['symbol'] == 'MSFT']['simple_ret_2'].values
     assert np.isnan(aapl[0]) and np.isnan(aapl[1])
@@ -145,8 +145,8 @@ def test_compute_returns_multi_asset_horizon_2(multi_asset_ohlcv_pandas):
 def test_compute_returns_pandas_polars_consistency(single_asset_ohlcv_pandas):
     """Should return identical results for pandas and polars input."""
     pl_df = pl.from_pandas(single_asset_ohlcv_pandas)
-    res_pd = compute_simple_returns(single_asset_ohlcv_pandas, horizon=1)
-    res_pl = compute_simple_returns(pl_df, horizon=1).to_pandas()
+    res_pd = simple_returns(single_asset_ohlcv_pandas, horizon=1)
+    res_pl = simple_returns(pl_df, horizon=1).to_pandas()
     np.testing.assert_allclose(
         res_pd['simple_ret_1'].values[1:],
         res_pl['simple_ret_1'].values[1:],
@@ -157,12 +157,12 @@ def test_compute_returns_pandas_polars_consistency(single_asset_ohlcv_pandas):
 def test_compute_returns_missing_column_raises(single_asset_ohlcv_pandas):
     """Should raise KeyError for missing required columns."""
     with pytest.raises(KeyError):
-        compute_simple_returns(single_asset_ohlcv_pandas.drop(columns=['close']), horizon=1)
+        simple_returns(single_asset_ohlcv_pandas.drop(columns=['close']), horizon=1)
 
 def test_compute_returns_invalid_type_raises():
     """Should raise TypeError for unsupported input types."""
     with pytest.raises(TypeError):
-        compute_simple_returns([[1, 2, 3]], horizon=1)
+        simple_returns([[1, 2, 3]], horizon=1)
 
 
 # ------------------------------------------------------
@@ -171,18 +171,18 @@ def test_compute_returns_invalid_type_raises():
 # output structure
 def test_compute_log_returns_output_columns(single_asset_ohlcv_pandas):
     """Should return only time, symbol and log_ret column."""
-    result = compute_log_returns(single_asset_ohlcv_pandas, horizon=1)
+    result = log_returns(single_asset_ohlcv_pandas, horizon=1)
     assert set(result.columns) == {'time', 'symbol', 'log_ret_1'}
 
 def test_compute_log_returns_output_shape(single_asset_ohlcv_pandas):
     """Should return same number of rows as input."""
-    result = compute_log_returns(single_asset_ohlcv_pandas, horizon=1)
+    result = log_returns(single_asset_ohlcv_pandas, horizon=1)
     assert len(result) == len(single_asset_ohlcv_pandas)
 
 # correctness - single asset
 def test_compute_log_returns_values_horizon_1(single_asset_ohlcv_pandas):
     """Should compute correct log returns for horizon=1."""
-    result = compute_log_returns(single_asset_ohlcv_pandas, horizon=1)
+    result = log_returns(single_asset_ohlcv_pandas, horizon=1)
     assert np.isnan(result['log_ret_1'].iloc[0])
     np.testing.assert_allclose(
         result['log_ret_1'].values[1:],
@@ -192,7 +192,7 @@ def test_compute_log_returns_values_horizon_1(single_asset_ohlcv_pandas):
 
 def test_compute_log_returns_values_horizon_2(single_asset_ohlcv_pandas):
     """Should compute correct log returns for horizon=2."""
-    result = compute_log_returns(single_asset_ohlcv_pandas, horizon=2)
+    result = log_returns(single_asset_ohlcv_pandas, horizon=2)
     assert np.isnan(result['log_ret_2'].iloc[0]) and np.isnan(result['log_ret_2'].iloc[1])
     np.testing.assert_allclose(
         result['log_ret_2'].values[2:],
@@ -203,7 +203,7 @@ def test_compute_log_returns_values_horizon_2(single_asset_ohlcv_pandas):
 # correctness - multi asset
 def test_compute_log_returns_multi_asset_no_mixing(multi_asset_ohlcv_pandas):
     """Groupby must not mix assets - each asset should be computed independently."""
-    result = compute_log_returns(multi_asset_ohlcv_pandas, horizon=1)
+    result = log_returns(multi_asset_ohlcv_pandas, horizon=1)
     aapl = result[result['symbol'] == 'AAPL']['log_ret_1'].values
     msft = result[result['symbol'] == 'MSFT']['log_ret_1'].values
     assert np.isnan(aapl[0])
@@ -213,7 +213,7 @@ def test_compute_log_returns_multi_asset_no_mixing(multi_asset_ohlcv_pandas):
 
 def test_compute_log_returns_multi_asset_horizon_2(multi_asset_ohlcv_pandas):
     """Horizon=2 should use price 2 bars before per asset independently."""
-    result = compute_log_returns(multi_asset_ohlcv_pandas, horizon=2)
+    result = log_returns(multi_asset_ohlcv_pandas, horizon=2)
     aapl = result[result['symbol'] == 'AAPL']['log_ret_2'].values
     msft = result[result['symbol'] == 'MSFT']['log_ret_2'].values
     assert np.isnan(aapl[0]) and np.isnan(aapl[1])
@@ -224,16 +224,16 @@ def test_compute_log_returns_multi_asset_horizon_2(multi_asset_ohlcv_pandas):
 # log vs simple return relationship
 def test_log_returns_less_than_simple_return(single_asset_ohlcv_pandas):
     """Log return should always be less than simple return for positive returns."""
-    log_ret = compute_log_returns(single_asset_ohlcv_pandas, horizon=1)
-    simple_ret = compute_simple_returns(single_asset_ohlcv_pandas, horizon=1)
+    log_ret = log_returns(single_asset_ohlcv_pandas, horizon=1)
+    simple_ret = simple_returns(single_asset_ohlcv_pandas, horizon=1)
     assert (log_ret['log_ret_1'].dropna() < simple_ret['simple_ret_1'].dropna()).all()
 
 # pandas / polars consistency
 def test_compute_log_returns_pandas_polars_consistency(single_asset_ohlcv_pandas):
     """Should return identical results for pandas and polars input."""
     pl_df = pl.from_pandas(single_asset_ohlcv_pandas)
-    res_pd = compute_log_returns(single_asset_ohlcv_pandas, horizon=1)
-    res_pl = compute_log_returns(pl_df, horizon=1).to_pandas()
+    res_pd = log_returns(single_asset_ohlcv_pandas, horizon=1)
+    res_pl = log_returns(pl_df, horizon=1).to_pandas()
     np.testing.assert_allclose(
         res_pd['log_ret_1'].values[1:],
         res_pl['log_ret_1'].values[1:],
@@ -244,11 +244,11 @@ def test_compute_log_returns_pandas_polars_consistency(single_asset_ohlcv_pandas
 def test_compute_log_returns_missing_column_raises(single_asset_ohlcv_pandas):
     """Should raise KeyError for missing required columns."""
     with pytest.raises(KeyError):
-        compute_log_returns(
+        log_returns(
             single_asset_ohlcv_pandas.drop(columns=['close']), horizon=1
         )
 
 def test_compute_log_returns_invalid_type_raises():
     """Should raise TypeError for unsupported input types."""
     with pytest.raises(TypeError):
-        compute_log_returns([[1, 2, 3]], horizon=1)
+        log_returns([[1, 2, 3]], horizon=1)
