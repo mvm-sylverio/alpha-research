@@ -70,9 +70,22 @@ def test_compute_returns_pandas_polars_consistency(single_asset_ohlcv_pandas):
     res_pd = simple_returns(single_asset_ohlcv_pandas, horizon=1)
     res_pl = simple_returns(pl_df, horizon=1).to_pandas()
     np.testing.assert_allclose(
-        res_pd['simple_ret_1'].values[1:],
-        res_pl['simple_ret_1'].values[1:],
-        rtol=1e-6
+        res_pd['simple_ret_1'].values,
+        res_pl['simple_ret_1'].values,
+        rtol=1e-6,
+        equal_nan=True
+    )
+
+def test_compute_returns_pandas_polars_consistency_multi_asset(multi_asset_ohlcv_pandas):
+    """Should return identical results for pandas and polars multi-asset input."""
+    pl_df = pl.from_pandas(multi_asset_ohlcv_pandas)
+    res_pd = simple_returns(multi_asset_ohlcv_pandas, horizon=1)
+    res_pl = simple_returns(pl_df, horizon=1).to_pandas()
+    np.testing.assert_allclose(
+        res_pd['simple_ret_1'].values,
+        res_pl['simple_ret_1'].values,
+        rtol=1e-6,
+        equal_nan=True
     )
 
 # raises
@@ -88,7 +101,7 @@ def test_compute_returns_invalid_type_raises():
 
 
 # ------------------------------------------------------
-# compute_log_returns
+# log_returns
 # ------------------------------------------------------
 # output structure
 def test_compute_log_returns_output_columns(single_asset_ohlcv_pandas):
@@ -160,6 +173,18 @@ def test_compute_log_returns_pandas_polars_consistency(single_asset_ohlcv_pandas
         res_pd['log_ret_1'].values[1:],
         res_pl['log_ret_1'].values[1:],
         rtol=1e-6
+    )
+
+def test_compute_log_returns_pandas_polars_consistency_multi_asset(multi_asset_ohlcv_pandas):
+    """Should return identical results for pandas and polars multi-asset input."""
+    pl_df = pl.from_pandas(multi_asset_ohlcv_pandas)
+    res_pd = log_returns(multi_asset_ohlcv_pandas, horizon=1)
+    res_pl = log_returns(pl_df, horizon=1).to_pandas()
+    np.testing.assert_allclose(
+        res_pd['log_ret_1'].values,
+        res_pl['log_ret_1'].values,
+        rtol=1e-6,
+        equal_nan=True
     )
 
 # raises
