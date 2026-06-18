@@ -1,90 +1,12 @@
 import pytest
-import pandas as pd
 import polars as pl
 import numpy as np
 
 from alpha_research.features.returns import simple_returns, log_returns
 
-# ------------------------------------------------------
-# fixtures
-# ------------------------------------------------------
-@pytest.fixture
-def single_asset_ohlcv_pandas():
-    """
-    Single asset, 5 bars.
-    close = [100, 110, 121, 133.1, 146.41]
-
-    Precomputed simple_ret_1:
-        bar 0: NaN (no previous)
-        bar 1: 110/100 - 1 = 0.10
-        bar 2: 121/110 - 1 = 0.10
-        bar 3: 133.1/121 - 1 = 0.10
-        bar 4: 146.41/133.1 - 1 = 0.10
-
-    Precomputed simple_ret_2:
-        bar 0: NaN
-        bar 1: NaN
-        bar 2: 121/100 - 1 = 0.21
-        bar 3: 133.1/110 - 1 = 0.21
-        bar 4: 146.41/121 - 1 = 0.21
-
-    Precomputed log_ret_1:
-        bar 0: NaN
-        bar 1: ln(110/100) = ln(1.10) ≈ 0.09531
-        bar 2: ln(121/110) = ln(1.10) ≈ 0.09531
-        bar 3: ln(133.1/121) = ln(1.10) ≈ 0.09531
-        bar 4: ln(146.41/133.1) = ln(1.10) ≈ 0.09531
-
-    Precomputed log_ret_2:
-        bar 0: NaN
-        bar 1: NaN
-        bar 2: ln(121/100) = ln(1.21) ≈ 0.19062
-        bar 3: ln(133.1/110) ≈ 0.19062
-        bar 4: ln(146.41/121) ≈ 0.19062
-    """
-    return pd.DataFrame({
-        'time': ['2024-01-01', '2024-01-02', '2024-01-03', '2024-01-04', '2024-01-05'],
-        'symbol': ['AAPL'] * 5,
-        'close': [100.0, 110.0, 121.0, 133.1, 146.41],
-    })
-
-
-@pytest.fixture
-def multi_asset_ohlcv_pandas():
-    """
-    Two assets, 3 bars each — interleaved.
-    AAPL close = [100, 110, 121]
-    MSFT close = [200, 210, 220]
-
-    Precomputed ret_1:
-        AAPL: [NaN, 0.10, 0.10]
-        MSFT: [NaN, 0.05, 0.04762]
-
-    Precomputed ret_2:
-        AAPL: [NaN, NaN, 0.21]
-        MSFT: [NaN, NaN, 0.10]
-
-    Precomputed log_ret_1:
-        AAPL: [NaN, ln(1.10)≈0.09531, ln(1.10)≈0.09531]
-        MSFT: [NaN, ln(210/200)≈0.04879, ln(220/210)≈0.04652]
-
-    Precomputed log_ret_2:
-        AAPL: [NaN, NaN, ln(121/100)≈0.19062]
-        MSFT: [NaN, NaN, ln(220/200)≈0.09531]
-
-    Critical: groupby must not mix assets.
-    """
-    return pd.DataFrame({
-        'time': ['2024-01-01', '2024-01-01',
-                 '2024-01-02', '2024-01-02',
-                 '2024-01-03', '2024-01-03'],
-        'symbol': ['AAPL', 'MSFT', 'AAPL', 'MSFT', 'AAPL', 'MSFT'],
-        'close': [100.0, 200.0, 110.0, 210.0, 121.0, 220.0],
-    })
-
 
 # ------------------------------------------------------
-# compute_simple_returns
+# simple_returns
 # ------------------------------------------------------
 # output structure
 def test_compute_returns_output_columns(single_asset_ohlcv_pandas):
