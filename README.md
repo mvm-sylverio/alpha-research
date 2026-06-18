@@ -22,15 +22,21 @@ Completed modules are marked; remaining items reflect the planned roadmap.
 - [ ] Volume bars / dollar bars
 - [ ] Exploratory data analysis (EDA)
 - [ ] Feature engineering and preprocessing - continuous implementation - basic are tracked here
-  - [ ] Raw features
-  - [ ] Refined features
-  - [ ] Transformations
+  - **Features** (partial — expanding)
+    - [x] Simple and Log return
+    - [x] Forward return (target)
+    - [x] Price-to-SMA ratio and SMA crossover
+    - [ ] RSI, ATR, realized volatility *(planned)*
+    - [ ] Composite and interaction features *(planned)*
+  - **Preprocessing transformations** (planned)
+    - [x] Rank
+    - [ ] Z-score, winsorization, volatility scaling, volume scaling *(planned)*
 - [x] Stationarity testing (ADF) - for time-series models and fractional differentiation
-- [ ] Triple Barrier Method (labeling)
+- [ ] Triple Barrier Method (labeling) - planned in targets module
 - [ ] Event-based sampling (CUSUM filter)
 
 ### Research — "Does the signal exist?"
-Ideally, should be done on 80-90% of the dataset. 10-20% should be reserved for validation and never used on research.
+Ideally, done on 80-90% of the dataset. 10-20% should be reserved for validation and never used on research.
 
 **Foundation — IC Analysis**
 - [x] Cross-sectional Information Coefficient (IC) — Spearman and Pearson
@@ -102,29 +108,44 @@ Final validation on the held-out period defined at the start of research.
 
 ```python
 import pandas as pd
+from alpha_research.features.returns import simple_returns, log_returns
+from alpha_research.features.targets import fwd_returns
+from alpha_research.features.trend import price_to_sma_ratio, sma_crossover
+from alpha_research.features.transformations import cross_sectional_rank
 from alpha_research.evaluation.ic import compute_ic, ic_summary_table
 from alpha_research.evaluation.statistical_tests import benjamini_hochberg
 
-df = pd.DataFrame()  # or pl.DataFrame
+# 1. Compute raw features from OHLCV
+df_ohlcv = pd.DataFrame()  # your OHLCV data
 
-# Compute IC time series for a single feature
-ic_series = compute_ic(df, feature="mom_5_rank", target="fwd_ret_10")
+ret_5    = simple_returns(df_ohlcv, horizon=5)
+sma_ratio = price_to_sma_ratio(df_ohlcv, window=20)
+target   = fwd_returns(df_ohlcv, horizon=10)
 
-# Summarize IC across multiple features with group classification
+# 2. Merge features and target into research DataFrame
+df = (ret_5
+    .merge(sma_ratio, on=['time', 'symbol'])
+    .merge(target,    on=['time', 'symbol'])
+    .dropna()
+)
+
+# 3. Apply cross-sectional rank transformation
+df = cross_sectional_rank(df, feature_cols=['simple_ret_5', 'price_to_sma_ratio_20'])
+
+# 4. Compute IC summary table with feature group classification
 feature_groups = {
-    "mom_5_rank": "momentum",
-    "mom_21_rank": "momentum",
-    "rsi_14_rank": "mean_reversion",
+    'simple_ret_5_rank': 'momentum',
+    'price_to_sma_ratio_20_rank': 'trend',
 }
 
 table = ic_summary_table(
     df,
-    feature_list=["mom_5_rank", "mom_21_rank", "rsi_14_rank"],
+    feature_list=['simple_ret_5_rank', 'price_to_sma_ratio_20_rank'],
     target="fwd_ret_10",
     feature_groups=feature_groups,
 )
 
-# Apply FDR correction per signal family with Benjamini-Hochberg correction
+# 5. Apply FDR correction per signal family with Benjamini-Hochberg correction
 fdr_corrected_table = benjamini_hochberg(table)
 
 significant_features = fdr_corrected_table[fdr_corrected_table['fdr_rejected']]
