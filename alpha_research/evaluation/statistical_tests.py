@@ -9,6 +9,8 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.multitest import multipletests
 import math
 
+from alpha_research._utils import _validate_df
+
 __all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult', 'fdr_correction',
            'benjamini_hochberg', 'benjamini_yekutieli']
 
@@ -265,8 +267,8 @@ def fdr_correction(
 
     Parameters
     ----------
-    df : pd.DataFrame
-        df returned by ic.ic_summary_table with columns ['p_value', 'feature_group'].
+    df : pd.DataFrame | pl.DataFrame
+        DataFrame returned by ic.ic_summary_table with columns ['p_value', 'feature_group'].
     fdr : float
         significance level in which the corrected p-values will be tested against.
     method : {'bh', 'by'}
@@ -277,7 +279,7 @@ def fdr_correction(
 
     Returns
     -------
-    pd.DataFrame
+    pd.DataFrame | pl.DataFrame
         DataFrame with all the columns given by ic.ic_summary_table and additional
         ['fdr_rejected', 'fdr_corrected_p_values'] columns with the results from the
         FDR correction.
@@ -286,7 +288,7 @@ def fdr_correction(
     ------
     KeyError
         If p_value, feature_group are not columns of the df.
-    ValueError
+    TypeError
         If df is not pandas or polars type.
 
     Notes
@@ -294,12 +296,7 @@ def fdr_correction(
     Summary tables should not have different run performance in polars
     and pandas. Therefore, everything is transformed to pandas for code simplicity.
     """
-    # Initial checks on columns
-    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('df must be Pandas or Polars DataFrame.')
-
-    if any(col not in df.columns for col in ['p_value', 'feature_group']):
-        raise KeyError(f"df must have both 'p_value' and 'feature_group' columns.")
+    _validate_df(df, ['p_value', 'feature_group'])
 
     if isinstance(df, pd.DataFrame):
         return _fdr_correction_pandas(df, fdr, method)
