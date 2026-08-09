@@ -124,10 +124,10 @@ def compute_ic(
         ic_column: str = 'ic'
 ) -> pd.DataFrame | pl.DataFrame:
     """
-    Compute the Information Coefficient (IC) between two columns of a pandas or polars DataFrame.
+    Compute the Information Coefficient (IC) between two columns of a pandas or polars DataFrame
+    cross-sectionally for each date in the DataFrame.
 
-    IC measures the correlation between a signal feature and a target computed cross-sectionally
-    for each date in the DataFrame.
+    IC measures the correlation between a signal feature and a target.
 
     Parameters
     ----------

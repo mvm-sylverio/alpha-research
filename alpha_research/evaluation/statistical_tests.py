@@ -281,7 +281,7 @@ def fdr_correction(
     -------
     pd.DataFrame | pl.DataFrame
         DataFrame with all the columns given by ic.ic_summary_table and additional
-        ['fdr_rejected', 'fdr_corrected_p_values'] columns with the results from the
+        ['fdr_rejected', 'fdr_corrected_p_value'] columns with the results from the
         FDR correction.
 
     Raises
