@@ -75,6 +75,24 @@ def test_validate_dataframe_missing_column_raises():
     with pytest.raises(KeyError, match="missing required"):
         _validate_df(df, required_cols=['a', 'b'])
 
+# all missing values in columns
+def test_validate_df_all_missing_non_required_col_does_not_raise():
+    """Should not raise when all-missing column is not in required_cols."""
+    df = pd.DataFrame({'a': [1.0, 2.0], 'b': [np.nan, np.nan]})
+    _validate_df(df, required_cols=['a'])
+
+def test_validate_df_all_missing_reports_correct_column():
+    """Error message should name the column with all missing values."""
+    df = pd.DataFrame({'a': [np.nan, np.nan], 'b': [1.0, 2.0]})
+    with pytest.raises(ValueError, match="'a'"):
+        _validate_df(df, required_cols=['a', 'b'])
+
+def test_validate_df_multiple_all_missing_reports_all():
+    """Error message should name all columns with all missing values."""
+    df = pd.DataFrame({'a': [np.nan, np.nan], 'b': [np.nan, np.nan], 'c': [1.0, 2.0]})
+    with pytest.raises(ValueError, match="'a'"):
+        _validate_df(df, required_cols=['a', 'b', 'c'])
+
 
 # ------------------------------------------------------
 # _is_all_missing

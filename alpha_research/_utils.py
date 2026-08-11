@@ -24,13 +24,26 @@ def _validate_df(
     KeyError
         If columns in required_cols are not columns of the df.
     """
+    # Check DataFrame type
     if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('df must be Pandas or Polars DataFrame.')
+        raise TypeError('DataFrame must be Pandas or Polars type.')
 
+    # Check for empty DataFrame
+    if len(df) == 0:
+        raise ValueError("DataFrame must not be empty.")
+
+    # Check missing columns
     missing_cols = [col for col in required_cols if col not in df.columns]
 
     if missing_cols:
-        raise KeyError(f'missing required columns in df: {missing_cols}.')
+        raise KeyError(f'missing required columns in DataFrame: {missing_cols}.')
+
+    # Check None/NaN values on all columns
+    cols_with_all_missing = [col for col in required_cols if _is_all_missing(df[col])]
+
+    if cols_with_all_missing:
+        raise ValueError(f'required columns in DataFrame missing all values: {cols_with_all_missing}.')
+
 
 def _is_all_missing(series) -> bool:
     """
