@@ -262,74 +262,75 @@ def test_ic_metrics_stability_formula(positive_ic_series):
 # ------------------------------------------------------
 # ic_summary_table
 # ------------------------------------------------------
+# ic_summary_table.table
 def test_ic_summary_table_shape(cross_section_df_pandas):
-    """Should return one row per feature."""
-    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
+    """table should return one row per feature."""
+    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target').table
     assert result.shape[0] == 1
 
 def test_ic_summary_table_columns(cross_section_df_pandas):
-    """Should return expected columns."""
-    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
+    """table should return expected columns."""
+    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target').table
     expected = {'feature', 'mean', 'abs_mean', 'sign', 'std', 'stability',
                 'pct_positive', 'quantile25', 'quantile50', 'quantile75',
                 't_stat', 'p_value', 'feature_group'}
     assert set(result.columns) == expected
 
 def test_ic_summary_table_feature_group_default(cross_section_df_pandas):
-    """Should label all features as ungrouped when feature_groups is None."""
-    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
+    """table should label all features as ungrouped when feature_groups is None."""
+    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target').table
     assert result['feature_group'].iloc[0] == 'ungrouped'
 
 def test_ic_summary_table_feature_group_assigned(cross_section_df_pandas):
-    """Should assign correct group when feature_groups is provided."""
+    """table should assign correct group when feature_groups is provided."""
     result = ic_summary_table(
         cross_section_df_pandas, ['feature'], 'target',
         feature_groups={'feature': 'momentum'}
-    )
+    ).table
     assert result['feature_group'].iloc[0] == 'momentum'
 
 def test_ic_summary_table_feature_group_unknown(cross_section_df_pandas):
-    """Should label as ungrouped if feature not in feature_groups."""
+    """table should label as ungrouped if feature not in feature_groups."""
     result = ic_summary_table(
         cross_section_df_pandas, ['feature'], 'target',
         feature_groups={'other_feature': 'momentum'}
-    )
+    ).table
     assert result['feature_group'].iloc[0] == 'ungrouped'
 
 def test_ic_summary_table_empty_list_raises(cross_section_df_pandas):
-    """Should raise ValueError for empty feature_list."""
+    """table should raise ValueError for empty feature_list."""
     with pytest.raises(ValueError, match="empty"):
-        ic_summary_table(cross_section_df_pandas, [], 'target')
+        ic_summary_table(cross_section_df_pandas, [], 'target').table
 
 def test_ic_summary_table_polars(cross_section_df_polars):
-    """Should return pl.DataFrame for polars input."""
-    result = ic_summary_table(cross_section_df_polars, ['feature'], 'target')
+    """table should return pl.DataFrame for polars input."""
+    result = ic_summary_table(cross_section_df_polars, ['feature'], 'target').table
     assert isinstance(result, pl.DataFrame)
 
 def test_ic_summary_table_pandas_polars_consistency(cross_section_df_pandas, cross_section_df_polars):
-    """Should return numerically identical results for pandas and polars input."""
-    res_pd = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
-    res_pl = ic_summary_table(cross_section_df_polars, ['feature'], 'target')
+    """table should return numerically identical results for pandas and polars input."""
+    res_pd = ic_summary_table(cross_section_df_pandas, ['feature'], 'target').table
+    res_pl = ic_summary_table(cross_section_df_polars, ['feature'], 'target').table
     assert res_pd['mean'].iloc[0] == pytest.approx(res_pl['mean'][0], rel=1e-6)
     assert res_pd['t_stat'].iloc[0] == pytest.approx(res_pl['t_stat'][0], rel=1e-6)
 
 # Multiple features tests
 def test_ic_summary_table_multiple_features_shape(multi_feature_df_pandas):
-    """Should return one row per feature: 3 features = 3 rows."""
+    """table should return one row per feature: 3 features = 3 rows."""
     result = ic_summary_table(
         multi_feature_df_pandas,
         ['feature_a', 'feature_b', 'feature_c'],
         'target'
-    )
+    ).table
     assert result.shape[0] == 3
 
 def test_ic_summary_table_multiple_features_values(multi_feature_df_pandas):
-    """Should compute correct mean IC per feature."""
+    """table should compute correct mean IC per feature."""
     result = ic_summary_table(
         multi_feature_df_pandas,
         ['feature_a', 'feature_b', 'feature_c'],
         'target'
-    )
+    ).table
 
     means = dict(zip(result["feature"], result["mean"]))
 
@@ -338,7 +339,7 @@ def test_ic_summary_table_multiple_features_values(multi_feature_df_pandas):
     assert np.isnan(means["feature_c"])
 
 def test_ic_summary_table_multiple_feature_groups(multi_feature_df_pandas):
-    """Should assign correct groups to multiple features."""
+    """table should assign correct groups to multiple features."""
     groups = {
         'feature_a': 'momentum',
         'feature_b': 'momentum',
@@ -349,7 +350,7 @@ def test_ic_summary_table_multiple_feature_groups(multi_feature_df_pandas):
         ['feature_a', 'feature_b', 'feature_c'],
         'target',
         feature_groups=groups
-    )
+    ).table
 
     feature_groups_result = dict(zip(result["feature"], result["feature_group"]))
 
@@ -359,7 +360,38 @@ def test_ic_summary_table_multiple_feature_groups(multi_feature_df_pandas):
 
 
 def test_ic_summary_table_feature_order_preserved(multi_feature_df_pandas):
-    """Should preserve feature order from input list."""
+    """table should preserve feature order from input list."""
     features = ['feature_c', 'feature_a', 'feature_b']
-    result = ic_summary_table(multi_feature_df_pandas, features, 'target')
+    result = ic_summary_table(multi_feature_df_pandas, features, 'target').table
     assert list(result['feature']) == features
+
+
+# ic_summary_table.ic_frames
+def test_ic_summary_table_ic_frames_keys(cross_section_df_pandas):
+    """ic_frames should have one key per feature in feature_list."""
+    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
+    assert set(result.ic_frames.keys()) == {'feature'}
+
+def test_ic_summary_table_ic_frames_columns(cross_section_df_pandas):
+    """Each ic_frames DataFrame should have time and ic columns."""
+    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
+    assert 'time' in result.ic_frames['feature'].columns
+    assert 'ic' in result.ic_frames['feature'].columns
+
+def test_ic_summary_table_ic_frames_multiple_features(multi_feature_df_pandas):
+    """ic_frames should have one key per feature."""
+    features = ['feature_a', 'feature_b', 'feature_c']
+    result = ic_summary_table(multi_feature_df_pandas, features, 'target')
+    assert set(result.ic_frames.keys()) == set(features)
+
+def test_ic_summary_table_ic_frames_mean_consistent_with_table(cross_section_df_pandas):
+    """Mean of ic_frames series should match mean in summary table."""
+    result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target')
+    ic_mean_from_series = result.ic_frames['feature']['ic'].mean()
+    ic_mean_from_table = result.table['mean'].iloc[0]
+    assert ic_mean_from_series == pytest.approx(ic_mean_from_table, rel=1e-6)
+
+def test_ic_summary_table_ic_frames_polars(cross_section_df_polars):
+    """ic_frames should contain pl.DataFrame for polars input."""
+    result = ic_summary_table(cross_section_df_polars, ['feature'], 'target')
+    assert isinstance(result.ic_frames['feature'], pl.DataFrame)

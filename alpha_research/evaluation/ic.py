@@ -272,6 +272,23 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ICSummaryResult:
+    """
+    Result of ic_summary_table computation.
+
+    Attributes
+    ----------
+    table : pd.DataFrame | pl.DataFrame
+        Summary table with IC metrics and t-stats per feature.
+    ic_frames : dict[str, pd.DataFrame | pl.DataFrame]
+        Raw IC time series per feature — {feature_name: df[[time, ic]]}.
+        As returned by compute_ic(). Use for rolling analysis and plots.
+    """
+    table: pd.DataFrame | pl.DataFrame
+    ic_frames: dict[str, pd.DataFrame | pl.DataFrame]
+
+
 def ic_summary_table(
         df: pd.DataFrame | pl.DataFrame,
         feature_list: list[str],
@@ -279,7 +296,8 @@ def ic_summary_table(
         corr_method: Literal['pearson', 'spearman'] = 'spearman',
         date_column: str = 'time',
         feature_groups: dict[str, str] | None = None,
-) -> pd.DataFrame | pl.DataFrame:
+
+) -> ICSummaryResult:
     """
     Compute the information coefficient (IC) between every feature in feature_list and the target.
     Compute the Newey-West t-statistic and metrics for the IC of every feature in feature_list.
@@ -312,19 +330,23 @@ def ic_summary_table(
 
     Returns
     -------
-    pd.DataFrame | pl.DataFrame
-        Pandas or Polars DataFrame with the features, its group, respective ic metrics and
-        the t-stat results.
+    ICSummaryResult
+        IC summary table and dict containing the DataFrames of the ic time-series per feature.
     """
     # Guard against empty list
     if not feature_list:
         raise ValueError("feature_list must not be empty.")
 
     rows = []
+    ic_dfs_dict = {}
 
     for feature in feature_list:
         # the existence of the column on the df is already checked on compute_ic
         df_ic = compute_ic(df, feature, target, corr_method, date_column)
+
+        # Save df_ic to dict for return clause
+        ic_dfs_dict[feature] = df_ic
+
         ic_series = df_ic['ic']  # internal usage adopts default ic_column name
 
         # ic metrics
@@ -356,9 +378,9 @@ def ic_summary_table(
         })
 
     if isinstance(df, pd.DataFrame):
-        return pd.DataFrame(rows)
+        return ICSummaryResult(pd.DataFrame(rows), ic_dfs_dict)
     else:  # type already checked when calling compute_ic, else means pl.DataFrame
-        return pl.DataFrame(rows)
+        return ICSummaryResult(pl.DataFrame(rows), ic_dfs_dict)
 
 # --------------------------
 # Plots

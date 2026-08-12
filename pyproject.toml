@@ -15,14 +15,15 @@ dependencies = [
     "pandas>=2.0.0",
     "scipy>=1.10.0",
     "polars>=1.0.0",
-    "statsmodels>=0.14.0"
+    "statsmodels>=0.14.0",
+    "pyarrow>=14.0.0",
+    "python-dateutil>=2.9.0"
 ]
 
 [project.optional-dependencies]
 mt5 = ["MetaTrader5>=5.0.0"]
 dev = [
     "pytest>=7.0.0",
-    "pyarrow>=14.0.0",
 ]
 
 [tool.setuptools.packages.find]
