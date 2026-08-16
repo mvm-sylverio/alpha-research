@@ -57,7 +57,7 @@ def pl_str_some_valid():
 
 
 # ------------------------------------------------------
-# _validate_df
+# _validate_df_type
 # ------------------------------------------------------
 def test_validate_dataframe_accepts_pandas():
     """Should not raise for valid pandas DataFrame."""
@@ -74,6 +74,10 @@ def test_validate_dataframe_invalid_type_raises():
     with pytest.raises(TypeError):
         _validate_df([[1, 2]], required_cols=['a'])
 
+
+# ------------------------------------------------------
+# _validate_df
+# ------------------------------------------------------
 def test_validate_dataframe_missing_column_raises():
     """Should raise KeyError for missing required columns."""
     df = pd.DataFrame({'a': [1]})
@@ -213,7 +217,7 @@ def test_validate_same_backend_invalid_left_type_raises():
     """Should raise TypeError when left is not a supported DataFrame."""
     right = pd.DataFrame({'a': [1]})
 
-    with pytest.raises(TypeError, match='left must be'):
+    with pytest.raises(TypeError, match='Pandas or Polars'):
         _validate_same_backend([[1]], right)
 
 
@@ -221,5 +225,5 @@ def test_validate_same_backend_invalid_right_type_raises():
     """Should raise TypeError when right is not a supported DataFrame."""
     left = pl.DataFrame({'a': [1]})
 
-    with pytest.raises(TypeError, match='right must be'):
+    with pytest.raises(TypeError, match='Pandas or Polars'):
         _validate_same_backend(left, [[1]])

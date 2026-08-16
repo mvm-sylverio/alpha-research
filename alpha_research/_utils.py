@@ -2,13 +2,33 @@ import pandas as pd
 import polars as pl
 
 
+def _validate_df_type(df: pd.DataFrame | pl.DataFrame):
+    """
+    Validate a DataFrame type before usage. Only accepts Polars or Pandas DataFrame.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        df which will be validated.
+
+    Raises
+    ------
+    TypeError
+        If df is not pandas or polars type.
+    """
+    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
+        raise TypeError('DataFrame must be Pandas or Polars type.')
+
+
 def _validate_df(
         df: pd.DataFrame | pl.DataFrame,
         required_cols: list[str],
 ) -> None:
     """
-    Validate a Dataframe before usage. Includes variable type check
-    and columns existence check.
+    Validate a Dataframe before usage.
+
+    Includes variable type check, columns existence check empty DataFrame
+    and all-NaN/Nulls columns check.
 
     Parameters
     ----------
@@ -23,10 +43,11 @@ def _validate_df(
         If df is not pandas or polars type.
     KeyError
         If columns in required_cols are not columns of the df.
+    ValueError
+        If DataFrame is empty or required columns are missing all values.
     """
     # Check DataFrame type
-    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('DataFrame must be Pandas or Polars type.')
+    _validate_df_type(df)
 
     # Check for empty DataFrame
     if len(df) == 0:
@@ -95,8 +116,7 @@ def _select_columns(
     TypeError
         If df is not a Pandas or Polars DataFrame.
     """
-    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('DataFrame must be Pandas or Polars type.')
+    _validate_df_type(df)
 
     if isinstance(df, pd.DataFrame):
         return df[columns]
@@ -117,14 +137,11 @@ def _validate_same_backend(
         If an input is not a Pandas or Polars DataFrame, or if the
         DataFrames use different backends.
     """
-    if not isinstance(left, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('left must be a Pandas or Polars DataFrame.')
-
-    if not isinstance(right, (pd.DataFrame, pl.DataFrame)):
-        raise TypeError('right must be a Pandas or Polars DataFrame.')
+    # validate left and right DataFrame backends
+    _validate_df_type(left)
+    _validate_df_type(right)
 
     if isinstance(left, pd.DataFrame) != isinstance(right, pd.DataFrame):
         raise TypeError(
-            "feature_fn and target_fn must return the same DataFrame "
-            "backend as the input df."
+            "left and right arguments must use the same DataFrame backend."
         )
