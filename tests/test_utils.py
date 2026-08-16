@@ -10,6 +10,7 @@ from alpha_research._utils import (
     _select_columns,
     _validate_df,
     _validate_same_backend,
+    _validate_unique_keys,
 )
 
 # ------------------------------------------------------
@@ -227,3 +228,48 @@ def test_validate_same_backend_invalid_right_type_raises():
 
     with pytest.raises(TypeError, match='Pandas or Polars'):
         _validate_same_backend(left, [[1]])
+
+
+# ------------------------------------------------------
+# _validate_unique_keys
+# ------------------------------------------------------
+def test_validate_unique_keys_accepts_unique_pandas_keys():
+    """Should not raise when pandas key pairs are unique."""
+    df = pd.DataFrame({
+        'time': [1, 1, 2],
+        'symbol': ['A', 'B', 'A'],
+    })
+
+    _validate_unique_keys(df, ['time', 'symbol'], 'feature_df')
+
+
+def test_validate_unique_keys_accepts_unique_polars_keys():
+    """Should not raise when polars key pairs are unique."""
+    df = pl.DataFrame({
+        'time': [1, 1, 2],
+        'symbol': ['A', 'B', 'A'],
+    })
+
+    _validate_unique_keys(df, ['time', 'symbol'], 'feature_df')
+
+
+def test_validate_unique_keys_rejects_duplicate_pandas_keys():
+    """Should raise when pandas contains a duplicated key pair."""
+    df = pd.DataFrame({
+        'time': [1, 1],
+        'symbol': ['A', 'A'],
+    })
+
+    with pytest.raises(ValueError, match='feature_df must contain unique'):
+        _validate_unique_keys(df, ['time', 'symbol'], 'feature_df')
+
+
+def test_validate_unique_keys_rejects_duplicate_polars_keys():
+    """Should raise when polars contains a duplicated key pair."""
+    df = pl.DataFrame({
+        'time': [1, 1],
+        'symbol': ['A', 'A'],
+    })
+
+    with pytest.raises(ValueError, match='feature_df must contain unique'):
+        _validate_unique_keys(df, ['time', 'symbol'], 'feature_df')

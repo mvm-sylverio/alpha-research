@@ -145,3 +145,19 @@ def _validate_same_backend(
         raise TypeError(
             "left and right arguments must use the same DataFrame backend."
         )
+
+
+def _validate_unique_keys(
+        df: pd.DataFrame | pl.DataFrame,
+        keys: list[str],
+        df_name: str,
+) -> None:
+    if isinstance(df, pd.DataFrame):
+        has_duplicates = df.duplicated(subset=keys).any()
+    else:
+        has_duplicates = df.select(keys).is_duplicated().any()
+
+    if has_duplicates:
+        raise ValueError(
+            f'{df_name} must contain unique {keys} pairs.'
+        )
