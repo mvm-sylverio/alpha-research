@@ -111,6 +111,19 @@ def _select_columns(
     """
     Select columns from a Pandas or Polars DataFrame.
 
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        DataFrame from which columns will be selected.
+    columns : list[str]
+        Names of the columns to select, in the desired output order.
+
+    Returns
+    -------
+    pd.DataFrame | pl.DataFrame
+        DataFrame containing only the requested columns and preserving the
+        input backend.
+
     Raises
     ------
     TypeError
@@ -130,6 +143,18 @@ def _validate_same_backend(
 ) -> None:
     """
     Validate that two DataFrames use the same supported backend.
+
+    Parameters
+    ----------
+    left : pd.DataFrame | pl.DataFrame
+        First DataFrame to validate.
+    right : pd.DataFrame | pl.DataFrame
+        Second DataFrame to validate.
+
+    Returns
+    -------
+    None
+        This function returns None when both inputs use the same backend.
 
     Raises
     ------
@@ -152,6 +177,34 @@ def _validate_unique_keys(
         keys: list[str],
         df_name: str,
 ) -> None:
+    """
+    Validate that a DataFrame has not duplicate key combinations.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        DataFrame whose key columns will be checked for duplicates.
+    keys : list[str]
+        Columns that jointly identify an observation.
+    df_name : str
+        DataFrame name used in the error message.
+
+    Returns
+    -------
+    None
+        This function returns None when every key combination is unique.
+
+    Raises
+    ------
+    ValueError
+        If two or more rows share the same key combination.
+
+    Notes
+    -----
+    This function does not check for duplicate values in
+    each key column independently. It assumes df is a supported DataFrame and
+    that keys exist; those validations should be performed upstream.
+    """
     if isinstance(df, pd.DataFrame):
         has_duplicates = df.duplicated(subset=keys).any()
     else:
