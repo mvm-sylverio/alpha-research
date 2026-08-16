@@ -227,18 +227,33 @@ def _fdr_correction_pandas(
     """
     df = df.copy()  # mutable array in pandas - requires copy.
 
+    # Default result for tests with invalid p-values
+    df['fdr_rejected'] = False
+    df['fdr_corrected_p_value'] = np.nan
+
     # get all group names in df['feature_group']
     groups = np.unique(df['feature_group'].to_numpy())
 
     for group in groups:
-        mask = df['feature_group'] == group
+        group_mask = df['feature_group'] == group
 
-        p_values = np.asarray(df.loc[mask, 'p_value'])
+        p_values = np.asarray(df.loc[group_mask, 'p_value'], dtype=float)
 
-        rejected, corrected_p_values, *_ = multipletests(pvals=p_values, alpha=fdr, method=f'fdr_{method}')
+        valid_mask = np.isfinite(p_values)
 
-        df.loc[mask, 'fdr_rejected'] = rejected  # True = passed fdr correction = signal is significant
-        df.loc[mask, 'fdr_corrected_p_value'] = corrected_p_values
+        # Nothing to correct in this group
+        if not valid_mask.any():
+            continue
+
+        valid_p_values = p_values[valid_mask]
+
+        rejected, corrected_p_values, *_ = multipletests(pvals=valid_p_values, alpha=fdr, method=f'fdr_{method}')
+
+        # Indices in the original df corresponding to valid tests
+        valid_indices = df.index[group_mask][valid_mask]
+
+        df.loc[valid_indices, 'fdr_rejected'] = rejected  # True = passed fdr correction = signal is significant
+        df.loc[valid_indices, 'fdr_corrected_p_value'] = corrected_p_values
 
     return df
 
@@ -255,6 +270,10 @@ def fdr_correction(
     If all features share the same group (e.g. 'ungrouped', the default in
     ic_summary_table), correction runs once across all features, equivalent
     to a global FDR correction.
+
+    Non-finite p-values are excluded from the multiple-testing procedure.
+    Those tests receive fdr_rejected=False and
+    fdr_corrected_p_value=nan.
 
     Why is this necessary?
     ----------------------
