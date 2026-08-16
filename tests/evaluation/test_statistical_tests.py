@@ -136,6 +136,26 @@ def none_significant_table():
         'mean':          [0.01, 0.01, 0.01],
     })
 
+@pytest.fixture
+def non_finite_pvalue_table():
+    """Table with finite and non-finite p-values in the same group."""
+    return pd.DataFrame({
+        'feature':       ['f1', 'f2', 'f3', 'f4'],
+        'p_value':       [0.01, np.nan, np.inf, -np.inf],
+        'feature_group': ['momentum'] * 4,
+        'mean':          [0.05, 0.04, 0.03, 0.02],
+    })
+
+@pytest.fixture
+def all_non_finite_pvalue_table():
+    """Table containing no finite p-values."""
+    return pd.DataFrame({
+        'feature':       ['f1', 'f2', 'f3'],
+        'p_value':       [np.nan, np.inf, -np.inf],
+        'feature_group': ['momentum'] * 3,
+        'mean':          [0.05, 0.04, 0.03],
+    })
+
 
 # ------------------------------------------------------
 # NWTestResult
@@ -347,6 +367,24 @@ def test_fdr_corrected_pvalues_in_valid_range(single_group_table):
     assert (result['fdr_corrected_p_value'] >= 0).all()
     assert (result['fdr_corrected_p_value'] <= 1).all()
 
+
+def test_fdr_excludes_non_finite_pvalues(non_finite_pvalue_table):
+    """Should leave non-finite p-values unrejected and uncorrected."""
+    result = fdr_correction(non_finite_pvalue_table)
+
+    assert bool(result.loc[0, 'fdr_rejected']) is True
+    assert result.loc[0, 'fdr_corrected_p_value'] == pytest.approx(0.01)
+    assert not result.loc[1:, 'fdr_rejected'].any()
+    assert result.loc[1:, 'fdr_corrected_p_value'].isna().all()
+
+
+def test_fdr_handles_group_with_only_non_finite_pvalues(all_non_finite_pvalue_table):
+    """Should return default FDR results when a group has no finite p-values."""
+    result = fdr_correction(all_non_finite_pvalue_table)
+
+    assert not result['fdr_rejected'].any()
+    assert result['fdr_corrected_p_value'].isna().all()
+
 # groups
 def test_fdr_applied_per_group(multi_group_table):
     """BH should be applied independently per group — same p_values in different groups should yield same results."""
@@ -403,4 +441,18 @@ def test_fdr_pandas_polars_consistency(single_group_table):
         res_pd.reset_index(drop=True),
         res_pl.reset_index(drop=True),
         check_dtype=False
+    )
+
+
+def test_fdr_non_finite_pvalues_pandas_polars_consistency(non_finite_pvalue_table):
+    """Should handle non-finite p-values identically for both backends."""
+    polars_table = pl.from_pandas(non_finite_pvalue_table)
+
+    result_pandas = fdr_correction(non_finite_pvalue_table)
+    result_polars = fdr_correction(polars_table).to_pandas()
+
+    pd.testing.assert_frame_equal(
+        result_pandas.reset_index(drop=True),
+        result_polars.reset_index(drop=True),
+        check_dtype=False,
     )
