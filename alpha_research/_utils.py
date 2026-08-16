@@ -81,3 +81,50 @@ def _is_all_missing(series) -> bool:
         return bool(series.isna().all())
 
     raise TypeError("Unsupported Series type.")
+
+
+def _select_columns(
+        df: pd.DataFrame | pl.DataFrame,
+        columns: list[str],
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Select columns from a Pandas or Polars DataFrame.
+
+    Raises
+    ------
+    TypeError
+        If df is not a Pandas or Polars DataFrame.
+    """
+    if not isinstance(df, (pd.DataFrame, pl.DataFrame)):
+        raise TypeError('DataFrame must be Pandas or Polars type.')
+
+    if isinstance(df, pd.DataFrame):
+        return df[columns]
+
+    return df.select(columns)
+
+
+def _validate_same_backend(
+        left: pd.DataFrame | pl.DataFrame,
+        right: pd.DataFrame | pl.DataFrame,
+) -> None:
+    """
+    Validate that two DataFrames use the same supported backend.
+
+    Raises
+    ------
+    TypeError
+        If an input is not a Pandas or Polars DataFrame, or if the
+        DataFrames use different backends.
+    """
+    if not isinstance(left, (pd.DataFrame, pl.DataFrame)):
+        raise TypeError('left must be a Pandas or Polars DataFrame.')
+
+    if not isinstance(right, (pd.DataFrame, pl.DataFrame)):
+        raise TypeError('right must be a Pandas or Polars DataFrame.')
+
+    if isinstance(left, pd.DataFrame) != isinstance(right, pd.DataFrame):
+        raise TypeError(
+            "feature_fn and target_fn must return the same DataFrame "
+            "backend as the input df."
+        )

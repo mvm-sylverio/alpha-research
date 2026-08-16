@@ -5,7 +5,12 @@ import numpy as np
 
 # Imports that should not be inspected
 # noinspection PyProtectedMember
-from alpha_research._utils import _validate_df, _is_all_missing
+from alpha_research._utils import (
+    _is_all_missing,
+    _select_columns,
+    _validate_df,
+    _validate_same_backend,
+)
 
 # ------------------------------------------------------
 # fixtures
@@ -145,3 +150,76 @@ def test_is_all_missing_invalid_type_raises():
     """Should raise TypeError for unsupported types."""
     with pytest.raises(TypeError):
         _is_all_missing([1, 2, 3])
+
+
+# ------------------------------------------------------
+# _select_columns
+# ------------------------------------------------------
+def test_select_columns_pandas_returns_requested_columns():
+    """Should select the requested columns from a pandas DataFrame."""
+    df = pd.DataFrame({'time': [1], 'symbol': ['A'], 'feature': [0.1]})
+
+    result = _select_columns(df, ['symbol', 'feature'])
+
+    assert list(result.columns) == ['symbol', 'feature']
+    assert result.to_dict(orient='list') == {'symbol': ['A'], 'feature': [0.1]}
+
+
+def test_select_columns_polars_returns_requested_columns():
+    """Should select the requested columns from a polars DataFrame."""
+    df = pl.DataFrame({'time': [1], 'symbol': ['A'], 'feature': [0.1]})
+
+    result = _select_columns(df, ['symbol', 'feature'])
+
+    assert result.columns == ['symbol', 'feature']
+    assert result.to_dict(as_series=False) == {'symbol': ['A'], 'feature': [0.1]}
+
+
+def test_select_columns_invalid_type_raises():
+    """Should raise TypeError for an unsupported DataFrame type."""
+    with pytest.raises(TypeError, match='Pandas or Polars'):
+        _select_columns([[1, 2]], ['a'])
+
+
+# ------------------------------------------------------
+# _validate_same_backend
+# ------------------------------------------------------
+def test_validate_same_backend_accepts_pandas_dataframes():
+    """Should not raise when both DataFrames use pandas."""
+    left = pd.DataFrame({'a': [1]})
+    right = pd.DataFrame({'b': [2]})
+
+    _validate_same_backend(left, right)
+
+
+def test_validate_same_backend_accepts_polars_dataframes():
+    """Should not raise when both DataFrames use polars."""
+    left = pl.DataFrame({'a': [1]})
+    right = pl.DataFrame({'b': [2]})
+
+    _validate_same_backend(left, right)
+
+
+def test_validate_same_backend_rejects_mixed_dataframes():
+    """Should raise when DataFrames use different backends."""
+    left = pd.DataFrame({'a': [1]})
+    right = pl.DataFrame({'b': [2]})
+
+    with pytest.raises(TypeError, match='same DataFrame backend'):
+        _validate_same_backend(left, right)
+
+
+def test_validate_same_backend_invalid_left_type_raises():
+    """Should raise TypeError when left is not a supported DataFrame."""
+    right = pd.DataFrame({'a': [1]})
+
+    with pytest.raises(TypeError, match='left must be'):
+        _validate_same_backend([[1]], right)
+
+
+def test_validate_same_backend_invalid_right_type_raises():
+    """Should raise TypeError when right is not a supported DataFrame."""
+    left = pl.DataFrame({'a': [1]})
+
+    with pytest.raises(TypeError, match='right must be'):
+        _validate_same_backend(left, [[1]])
