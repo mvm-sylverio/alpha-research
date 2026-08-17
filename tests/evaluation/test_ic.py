@@ -3,6 +3,15 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from alpha_research.evaluation.ic import information_coefficient, compute_ic, compute_ic_metrics, ic_summary_table
+from alpha_research.evaluation.ic import (
+    compute_ic,
+    compute_ic_metrics,
+    _generate_target_frames,
+    _ic_decay_from_target_frames,
+    ic_decay,
+    ic_summary_table,
+    information_coefficient,
+)
 
 
 # ------------------------------------------------------
@@ -91,6 +100,44 @@ def multi_feature_df_pandas():
         'feature_c': [1.0, 1.0, 1.0, 1.0, 1.0] * 2,
         'target':    [1.0, 2.0, 3.0, 4.0, 5.0] * 2,
     })
+
+
+@pytest.fixture
+def decay_features_df_pandas():
+    return pd.DataFrame({
+        'time': ['2024-01-01'] * 5 + ['2024-01-02'] * 5 + ['2024-01-03'] * 5,
+        'symbol': ['A', 'B', 'C', 'D', 'E'] * 3,
+        'feature_a': [1.0, 2.0, 3.0, 4.0, 5.0] * 3,
+        'feature_b': [5.0, 4.0, 3.0, 2.0, 1.0] * 3,
+    })
+
+
+@pytest.fixture
+def decay_target_data_pandas(decay_features_df_pandas):
+    return pd.DataFrame({
+        'time': decay_features_df_pandas['time'],
+        'symbol': decay_features_df_pandas['symbol'],
+        'target_1': [
+            1.0, 2.0, 3.0, 4.0, 5.0,
+            1.0, 2.0, 3.0, 5.0, 4.0,
+            5.0, 4.0, 3.0, 2.0, 1.0,
+        ],
+        'target_2': [
+            5.0, 4.0, 3.0, 2.0, 1.0,
+            4.0, 5.0, 3.0, 2.0, 1.0,
+            1.0, 2.0, 3.0, 4.0, 5.0,
+        ],
+    })
+
+
+@pytest.fixture
+def decay_features_df_polars(decay_features_df_pandas):
+    return pl.from_pandas(decay_features_df_pandas)
+
+
+@pytest.fixture
+def decay_target_data_polars(decay_target_data_pandas):
+    return pl.from_pandas(decay_target_data_pandas)
 
 
 # ------------------------------------------------------
@@ -410,3 +457,392 @@ def test_ic_summary_table_ic_frames_polars(cross_section_df_polars):
     """ic_frames should contain pl.DataFrame for polars input."""
     result = ic_summary_table(cross_section_df_polars, ['feature'], 'target')
     assert isinstance(result.ic_frames['feature'], pl.DataFrame)
+
+
+# ------------------------------------------------------
+# _generate_target_frames
+# ------------------------------------------------------
+def test_generate_target_frames_calls_target_fn_once_per_sorted_horizon(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should generate one target DataFrame for each sorted horizon."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    result = _generate_target_frames(
+        df_feature=decay_features_df_pandas,
+        target_data=decay_target_data_pandas,
+        horizons=[2, 1],
+        target_fn=target_fn,
+    )
+
+    assert calls == [1, 2]
+    assert list(result) == [1, 2]
+    assert list(result[1].columns) == ['time', 'symbol', 'target_1']
+    assert list(result[2].columns) == ['time', 'symbol', 'target_2']
+
+
+def test_generate_target_frames_rejects_duplicate_horizons(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject duplicate horizons before calling target_fn."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='horizons must not contain duplicates'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[1, 1],
+            target_fn=target_fn,
+        )
+
+    assert calls == []
+
+
+def test_generate_target_frames_rejects_empty_horizons(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject an empty horizon list before calling target_fn."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='horizons must not be empty'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[],
+            target_fn=target_fn,
+        )
+
+    assert calls == []
+
+
+def test_generate_target_frames_rejects_none_horizon(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject None as a horizon value."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[None],
+            target_fn=target_fn,
+        )
+
+
+def test_generate_target_frames_rejects_nan_horizon(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject NaN as a horizon value."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[np.nan],
+            target_fn=target_fn,
+        )
+
+
+def test_generate_target_frames_rejects_float_horizon(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject a floating-point horizon value."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[1.0],
+            target_fn=target_fn,
+        )
+
+
+def test_generate_target_frames_rejects_string_horizon(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject a string horizon value."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=['1'],
+            target_fn=target_fn,
+        )
+
+
+def test_generate_target_frames_rejects_boolean_horizon(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject a boolean horizon value."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[True],
+            target_fn=target_fn,
+        )
+
+
+def test_generate_target_frames_rejects_non_positive_horizons(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject zero and negative horizon values."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[0],
+            target_fn=target_fn,
+        )
+
+    with pytest.raises(ValueError, match='positive integers'):
+        _generate_target_frames(
+            df_feature=decay_features_df_pandas,
+            target_data=decay_target_data_pandas,
+            horizons=[-1],
+            target_fn=target_fn,
+        )
+
+
+def test_generate_target_frames_pandas_polars_consistency(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+        decay_features_df_polars,
+        decay_target_data_polars,
+):
+    """Should generate equivalent target mappings for both backends."""
+    def pandas_target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    def polars_target_fn(target_data, horizon):
+        return target_data.select(['time', 'symbol', f'target_{horizon}'])
+
+    pandas_result = _generate_target_frames(
+        df_feature=decay_features_df_pandas,
+        target_data=decay_target_data_pandas,
+        horizons=[2, 1],
+        target_fn=pandas_target_fn,
+    )
+    polars_result = _generate_target_frames(
+        df_feature=decay_features_df_polars,
+        target_data=decay_target_data_polars,
+        horizons=[2, 1],
+        target_fn=polars_target_fn,
+    )
+
+    assert list(pandas_result) == list(polars_result) == [1, 2]
+
+    for horizon in pandas_result:
+        pd.testing.assert_frame_equal(
+            pandas_result[horizon].reset_index(drop=True),
+            polars_result[horizon].to_pandas().reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+# ------------------------------------------------------
+# _ic_decay_from_target_frames
+# ------------------------------------------------------
+def test_ic_decay_from_target_frames_uses_pre_generated_targets(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should compute decay directly from the supplied target mapping."""
+    target_frames = {
+        1: decay_target_data_pandas[['time', 'symbol', 'target_1']],
+        2: decay_target_data_pandas[['time', 'symbol', 'target_2']],
+    }
+
+    result = _ic_decay_from_target_frames(
+        df_feature=decay_features_df_pandas,
+        feature='feature_a',
+        target_frames=target_frames,
+        corr_method='spearman',
+        date_column='time',
+        symbol_column='symbol',
+        feature_groups={'feature_a': 'momentum'},
+        fdr=0.05,
+        fdr_method='bh',
+    )
+
+    assert list(result.table['horizon']) == [1, 2]
+    assert list(result.table['feature_group']) == ['momentum', 'momentum']
+    assert set(result.ic_frames) == {1, 2}
+
+
+def test_ic_decay_from_target_frames_sorts_horizons_in_result_table(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should sort the result table even when target frames are unordered."""
+    target_frames = {
+        2: decay_target_data_pandas[['time', 'symbol', 'target_2']],
+        1: decay_target_data_pandas[['time', 'symbol', 'target_1']],
+    }
+
+    result = _ic_decay_from_target_frames(
+        df_feature=decay_features_df_pandas,
+        feature='feature_a',
+        target_frames=target_frames,
+        corr_method='spearman',
+        date_column='time',
+        symbol_column='symbol',
+        feature_groups=None,
+        fdr=0.05,
+        fdr_method='bh',
+    )
+
+    assert list(result.table['horizon']) == [1, 2]
+
+
+def test_ic_decay_from_target_frames_pandas_polars_consistency(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+        decay_features_df_polars,
+        decay_target_data_polars,
+):
+    """Should return equivalent decay results for Pandas and Polars inputs."""
+    pandas_target_frames = {
+        1: decay_target_data_pandas[['time', 'symbol', 'target_1']],
+        2: decay_target_data_pandas[['time', 'symbol', 'target_2']],
+    }
+    polars_target_frames = {
+        1: decay_target_data_polars.select(['time', 'symbol', 'target_1']),
+        2: decay_target_data_polars.select(['time', 'symbol', 'target_2']),
+    }
+
+    pandas_result = _ic_decay_from_target_frames(
+        df_feature=decay_features_df_pandas,
+        feature='feature_a',
+        target_frames=pandas_target_frames,
+        corr_method='spearman',
+        date_column='time',
+        symbol_column='symbol',
+        feature_groups=None,
+        fdr=0.05,
+        fdr_method='bh',
+    )
+    polars_result = _ic_decay_from_target_frames(
+        df_feature=decay_features_df_polars,
+        feature='feature_a',
+        target_frames=polars_target_frames,
+        corr_method='spearman',
+        date_column='time',
+        symbol_column='symbol',
+        feature_groups=None,
+        fdr=0.05,
+        fdr_method='bh',
+    )
+
+    pd.testing.assert_frame_equal(
+        pandas_result.table.reset_index(drop=True),
+        polars_result.table.to_pandas().reset_index(drop=True),
+        check_dtype=False,
+    )
+    for horizon in pandas_result.ic_frames:
+        pd.testing.assert_frame_equal(
+            pandas_result.ic_frames[horizon].reset_index(drop=True),
+            polars_result.ic_frames[horizon].to_pandas().reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+# ------------------------------------------------------
+# ic_decay
+# ------------------------------------------------------
+def test_ic_decay_preserves_polars_backend(
+        decay_features_df_polars,
+        decay_target_data_polars,
+):
+    """Should return Polars results when features and targets use Polars."""
+    def target_fn(target_data, horizon):
+        return target_data.select(['time', 'symbol', f'target_{horizon}'])
+
+    result = ic_decay(
+        df_feature=decay_features_df_polars,
+        feature='feature_a',
+        target_data=decay_target_data_polars,
+        horizons=[1, 2],
+        target_fn=target_fn,
+    )
+
+    assert isinstance(result.table, pl.DataFrame)
+    assert all(isinstance(frame, pl.DataFrame) for frame in result.ic_frames.values())
+
+
+def test_ic_decay_pandas_polars_consistency(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+        decay_features_df_polars,
+        decay_target_data_polars,
+):
+    """Should return equivalent decay results for Pandas and Polars inputs."""
+    def pandas_target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    def polars_target_fn(target_data, horizon):
+        return target_data.select(['time', 'symbol', f'target_{horizon}'])
+
+    pandas_result = ic_decay(
+        df_feature=decay_features_df_pandas,
+        feature='feature_a',
+        target_data=decay_target_data_pandas,
+        horizons=[1, 2],
+        target_fn=pandas_target_fn,
+    )
+    polars_result = ic_decay(
+        df_feature=decay_features_df_polars,
+        feature='feature_a',
+        target_data=decay_target_data_polars,
+        horizons=[1, 2],
+        target_fn=polars_target_fn,
+    )
+
+    pd.testing.assert_frame_equal(
+        pandas_result.table.reset_index(drop=True),
+        polars_result.table.to_pandas().reset_index(drop=True),
+        check_dtype=False,
+    )
+    for horizon in pandas_result.ic_frames:
+        pd.testing.assert_frame_equal(
+            pandas_result.ic_frames[horizon].reset_index(drop=True),
+            polars_result.ic_frames[horizon].to_pandas().reset_index(drop=True),
+            check_dtype=False,
+        )
+

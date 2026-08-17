@@ -383,6 +383,326 @@ def ic_summary_table(
     else:  # type already checked when calling compute_ic, else means pl.DataFrame
         return ICSummaryResult(pl.DataFrame(rows), ic_dfs_dict)
 
+
+@dataclass(frozen=True, slots=True)
+class ICDecayResult:
+    """
+    Result of ic_decay computation.
+
+    Attributes
+    ----------
+    table : pd.DataFrame | pl.DataFrame
+        IC metrics, Newey-West statistics and FDR results for each horizon.
+    ic_frames : dict[int, pd.DataFrame | pl.DataFrame]
+        Raw IC time series for each horizon:
+        {horizon: df[[time, ic]]}.
+    """
+    table: pd.DataFrame | pl.DataFrame
+    ic_frames: dict[int, pd.DataFrame | pl.DataFrame]
+
+def ic_decay(
+        df_feature: pd.DataFrame | pl.DataFrame,
+        feature: str,
+        target_data: pd.DataFrame | pl.DataFrame,
+        horizons: list[int],
+        target_fn: TargetFn,
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        date_column: str = 'time',
+        symbol_column: str = 'symbol',
+        feature_groups: dict[str, str] | None = None,
+        fdr: float = 0.05,
+        fdr_method: Literal['bh', 'by'] = 'bh',
+) -> ICDecayResult:
+    """
+    Compute the Information Coefficient decay curve of one feature.
+
+    df_feature is a wide feature DataFrame. The selected feature is evaluated against
+    targets generated from target_data at multiple forward horizons. IC
+    metrics, Newey-West statistics and FDR-corrected significance are computed
+    independently for every horizon.
+
+    Multiple-testing correction is applied jointly across all horizons of the
+    feature, treating them as one family of hypotheses.
+
+    Parameters
+    ----------
+    df_feature : pd.DataFrame or pl.DataFrame
+        Wide feature DataFrame containing date_column, symbol_column, and
+        feature.
+    feature : str
+        Name of the feature column in df_feature to evaluate.
+    target_data : pd.DataFrame or pl.DataFrame
+        DataFrame passed to target_fn to generate each target. It must use the
+        same DataFrame backend as df.
+    horizons : list[int]
+        Forward horizons to evaluate. Must contain unique positive integers.
+    target_fn : Callable[[pd.DataFrame | pl.DataFrame, int], pd.DataFrame | pl.DataFrame]
+        Function used to generate targets. It must accept:
+
+            target_fn(target_data, horizon=horizon)
+
+        Fixed target configuration may be supplied by a wrapper function or
+        functools.partial when necessary.
+    corr_method : {'spearman', 'pearson'}
+        Correlation method used by compute_ic.
+    date_column : str
+        Date/time column.
+    symbol_column : str
+        Asset identifier column.
+    feature_groups : dict[str, str] | None
+        Optional mapping between feature name and its semantic feature group.
+        Used as metadata. FDR correction still occurs only across horizons
+        of this feature.
+    fdr : float
+        False discovery rate.
+    fdr_method : {'bh', 'by'}
+        Multiple-testing correction method.
+
+    Returns
+    -------
+    ICDecayResult
+        table:
+            One row per horizon containing IC metrics, Newey-West statistics
+            and FDR results.
+
+        ic_frames:
+            Raw IC time series indexed by horizon.
+
+    Raises
+    ------
+    ValueError
+        If df_feature or target_data is invalid, feature is missing, or horizons is
+        empty, contains duplicates, or contains non-positive values.
+    TypeError
+        If df_feature, target_data, or a target returned by target_fn use different
+        DataFrame backends.
+    """
+    _validate_df(df_feature, [date_column, symbol_column, feature])
+
+    target_frames = _generate_target_frames(
+        df_feature=df_feature,
+        target_data=target_data,
+        horizons=horizons,
+        target_fn=target_fn,
+    )
+    return _ic_decay_from_target_frames(
+        df_feature=df_feature,
+        feature=feature,
+        target_frames=target_frames,
+        corr_method=corr_method,
+        date_column=date_column,
+        symbol_column=symbol_column,
+        feature_groups=feature_groups,
+        fdr=fdr,
+        fdr_method=fdr_method,
+    )
+
+
+def _generate_target_frames(
+        df_feature: pd.DataFrame | pl.DataFrame,
+        target_data: pd.DataFrame | pl.DataFrame,
+        horizons: list[int],
+        target_fn: TargetFn,
+) -> dict[int, pd.DataFrame | pl.DataFrame]:
+    """
+    Generate one target DataFrame for each requested horizon.
+
+    Parameters
+    ----------
+    df_feature : pd.DataFrame | pl.DataFrame
+        Feature DataFrame used to validate the backend of target_data and the
+        generated target DataFrames.
+    target_data : pd.DataFrame | pl.DataFrame
+        DataFrame passed to target_fn to generate each target.
+    horizons : list[int]
+        Unique positive forward horizons to generate.
+    target_fn : Callable[[pd.DataFrame | pl.DataFrame, int], pd.DataFrame | pl.DataFrame]
+        Function called as target_fn(target_data, horizon=horizon).
+
+    Returns
+    -------
+    dict[int, pd.DataFrame | pl.DataFrame]
+        Target DataFrames indexed by their sorted horizon values.
+
+    Raises
+    ------
+    ValueError
+        If target_data is invalid, horizons is empty, contains duplicates, or
+        contains non-positive values.
+    TypeError
+        If df, target_data, or a target returned by target_fn use different
+        DataFrame backends.
+
+    Notes
+    -----
+    This helper computes every target once. The resulting mapping can be
+    reused across multiple features without calling target_fn again.
+    """
+    _validate_df(target_data, [])
+    _validate_same_backend(df_feature, target_data)
+
+    if not horizons:
+        raise ValueError("horizons must not be empty.")
+
+    if any(not isinstance(h, int) or isinstance(h, bool) or h <= 0 for h in horizons):
+        raise ValueError("horizons must contain positive integers.")
+
+    if len(set(horizons)) != len(horizons):
+        raise ValueError("horizons must not contain duplicates.")
+
+    target_frames = {}
+
+    for horizon in sorted(horizons):
+        target_df = target_fn(target_data, horizon=horizon)
+
+        _validate_same_backend(df_feature, target_df)
+
+        target_frames[horizon] = target_df
+
+    return target_frames
+
+
+def _ic_decay_from_target_frames(
+        df_feature: pd.DataFrame | pl.DataFrame,
+        feature: str,
+        target_frames: dict[int, pd.DataFrame | pl.DataFrame],
+        corr_method: Literal['pearson', 'spearman'],
+        date_column: str,
+        symbol_column: str,
+        feature_groups: dict[str, str] | None,
+        fdr: float,
+        fdr_method: Literal['bh', 'by'],
+) -> ICDecayResult:
+    """
+    Compute one feature's IC decay from pre-generated target DataFrames.
+
+    Parameters
+    ----------
+    df_feature : pd.DataFrame | pl.DataFrame
+        Wide feature DataFrame containing date_column, symbol_column, and
+        feature.
+    feature : str
+        Name of the feature column in df_feature to evaluate.
+    target_frames : dict[int, pd.DataFrame | pl.DataFrame]
+        Target DataFrames indexed by horizon. Each target DataFrame must
+        contain date_column, symbol_column, and exactly one target column.
+    corr_method : {'spearman', 'pearson'}
+        Correlation method used to calculate IC.
+    date_column : str
+        Date/time column.
+    symbol_column : str
+        Asset identifier column.
+    feature_groups : dict[str, str] | None
+        Optional mapping between feature names and semantic feature groups.
+    fdr : float
+        False discovery rate.
+    fdr_method : {'bh', 'by'}
+        Multiple-testing correction method.
+
+    Returns
+    -------
+    ICDecayResult
+        IC metrics, FDR results, and raw IC time series for every horizon.
+
+    Raises
+    ------
+    ValueError
+        If the feature or target DataFrames fail the join validation.
+    TypeError
+        If feature and target DataFrames use different backends.
+
+    Notes
+    -----
+    This helper does not call target_fn. It is shared by ic_decay() and
+    ic_decay_summary_table() so that batch evaluation can reuse targets
+    generated once per horizon.
+    """
+    feature_group = (
+        feature_groups.get(feature, 'ungrouped')
+        if feature_groups is not None
+        else 'ungrouped'
+    )
+
+    rows = []
+    ic_frames = {}
+
+    for horizon, target_df in target_frames.items():
+        target_col = get_feature_name(target_df, date_column, symbol_column)
+
+        joined_df = join_feature_target_frames(
+            feature_df=df_feature,
+            target_df=target_df,
+            feature_col=feature,
+            target_col=target_col,
+            time_col=date_column,
+            symbol_col=symbol_column,
+        )
+
+        df_ic = compute_ic(
+            joined_df,
+            feature=feature,
+            target=target_col,
+            corr_method=corr_method,
+            date_column=date_column,
+        )
+
+        ic_frames[horizon] = df_ic
+
+        ic_series = df_ic['ic']
+
+        metrics = compute_ic_metrics(ic_series)
+        nw_test = newey_west_tstat(ic_series)
+
+        rows.append({
+            'feature': feature,
+            'target': target_col,
+            'horizon': horizon,
+
+            'mean': metrics.mean,
+            'abs_mean': metrics.abs_mean,
+            'sign': metrics.sign,
+            'std': metrics.std,
+            'stability': metrics.stability,
+            'pct_positive': metrics.pct_positive,
+
+            'quantile25': metrics.quantiles['q25'],
+            'quantile50': metrics.quantiles['q50'],
+            'quantile75': metrics.quantiles['q75'],
+
+            't_stat': nw_test.t_stat,
+            'p_value': nw_test.p_value,
+
+            'feature_group': feature_group,
+
+            'n_obs': len(ic_series),
+        })
+
+    if isinstance(df_feature, pd.DataFrame):
+        result_table = pd.DataFrame(rows)
+    else:
+        result_table = pl.DataFrame(rows)
+
+    # One correction across all horizons of this feature.
+    result_table = fdr_correction(
+        result_table,
+        fdr=fdr,
+        method=fdr_method,
+    )
+
+    if isinstance(result_table, pd.DataFrame):
+        result_table = (
+            result_table
+            .sort_values('horizon')
+            .reset_index(drop=True)
+        )
+    else:
+        result_table = result_table.sort('horizon')
+
+    return ICDecayResult(
+        table=result_table,
+        ic_frames=ic_frames,
+    )
+
 # --------------------------
 # Plots
 # --------------------------
