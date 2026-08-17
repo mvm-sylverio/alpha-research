@@ -375,6 +375,7 @@ def ic_summary_table(
             't_stat': nw_test.t_stat,
             'p_value':nw_test.p_value,
             'feature_group': feature_group,
+            'n_obs': len(ic_series),
         })
 
     if isinstance(df, pd.DataFrame):

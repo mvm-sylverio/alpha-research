@@ -273,8 +273,23 @@ def test_ic_summary_table_columns(cross_section_df_pandas):
     result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target').table
     expected = {'feature', 'mean', 'abs_mean', 'sign', 'std', 'stability',
                 'pct_positive', 'quantile25', 'quantile50', 'quantile75',
-                't_stat', 'p_value', 'feature_group'}
+                't_stat', 'p_value', 'feature_group', 'n_obs'}
     assert set(result.columns) == expected
+
+
+def test_ic_summary_table_n_obs_matches_number_of_ic_observations(
+        cross_section_df_pandas,
+):
+    """n_obs should equal the number of cross-sectional IC observations."""
+    result = ic_summary_table(
+        cross_section_df_pandas,
+        ['feature'],
+        'target',
+    )
+
+    assert result.table['n_obs'].iloc[0] == 2
+    assert result.table['n_obs'].iloc[0] == len(result.ic_frames['feature'])
+
 
 def test_ic_summary_table_feature_group_default(cross_section_df_pandas):
     """table should label all features as ungrouped when feature_groups is None."""
