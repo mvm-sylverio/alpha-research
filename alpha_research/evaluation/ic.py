@@ -3,14 +3,17 @@ from dataclasses import dataclass
 import polars as pl
 import pandas as pd
 import numpy as np
-from typing import Literal
+from typing import Literal, Callable
 
 from scipy.stats import pearsonr, spearmanr
 
-from alpha_research.evaluation.statistical_tests import newey_west_tstat
-from alpha_research._utils import _validate_df
+from alpha_research.evaluation.statistical_tests import newey_west_tstat, fdr_correction
+from alpha_research._utils import _validate_df, _validate_same_backend
+from alpha_research.features.schema import get_feature_name, join_feature_target_frames
 
 __all__ = ['information_coefficient', 'compute_ic', 'ICMetrics', 'compute_ic_metrics', 'ic_summary_table']
+DataFrame = pd.DataFrame | pl.DataFrame
+TargetFn = Callable[[DataFrame, int], DataFrame]
 
 
 def information_coefficient(
@@ -701,6 +704,174 @@ def _ic_decay_from_target_frames(
     return ICDecayResult(
         table=result_table,
         ic_frames=ic_frames,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DecaySummaryResult:
+    """
+    Scalar summary of an IC decay curve.
+
+    Attributes
+    ----------
+    peak_horizon : int
+        Horizon with the highest absolute mean IC.
+    peak_abs_ic : float
+        Absolute mean IC at peak_horizon.
+    halflife_horizon : int | None
+        First tested horizon at or after peak_horizon where absolute
+        mean IC falls to 50% or less of peak_abs_ic.
+    last_significant_horizon : int | None
+        Largest horizon passing the FDR correction.
+    auc : float
+        Area under the absolute mean IC curve versus horizon.
+    """
+    peak_horizon: int
+    peak_abs_ic: float
+    halflife_horizon: int | None
+    last_significant_horizon: int | None
+    auc: float
+
+def ic_decay_summary(
+        decay_curve: pd.DataFrame | pl.DataFrame,
+) -> DecaySummaryResult:
+    """
+    Summarize an IC decay curve into scalar diagnostics.
+
+    The decay magnitude is defined as abs(mean IC) at each horizon,
+    not mean(abs(IC)).
+
+    Parameters
+    ----------
+    decay_curve : pd.DataFrame or pl.DataFrame
+        Table returned by ic_decay().table.
+
+        Required columns:
+        ['horizon', 'mean', 'fdr_rejected'].
+
+    Returns
+    -------
+    DecaySummaryResult
+        Scalar diagnostics describing signal strength and persistence.
+
+    Notes
+    -----
+    peak_horizon
+        Horizon with maximum abs(mean IC).
+
+    halflife_horizon
+        First tested horizon at or after the peak where abs(mean IC)
+        is <= 50% of the peak. This is a discrete diagnostic; no
+        interpolation is performed.
+
+        None if all tested horizons stay above 50% of peak IC.
+
+    last_significant_horizon
+        Largest horizon that passes FDR correction.
+
+    auc
+        Trapezoidal area under abs(mean IC) versus horizon.
+        Comparisons between features are meaningful when the same horizon
+        grid is used.
+    """
+    _validate_df(
+        decay_curve,
+        ['horizon', 'mean', 'fdr_rejected'],
+    )
+
+    if isinstance(decay_curve, pd.DataFrame):
+        curve = decay_curve.sort_values('horizon')
+
+        horizons = curve['horizon'].to_numpy(dtype=int)
+        mean_ic = curve['mean'].to_numpy(dtype=float)
+        rejected = curve['fdr_rejected'].to_numpy(dtype=bool)
+
+    else:
+        curve = decay_curve.sort('horizon')
+
+        horizons = curve['horizon'].to_numpy()
+        mean_ic = curve['mean'].to_numpy()
+        rejected = curve['fdr_rejected'].to_numpy()
+
+    if len(horizons) == 0:
+        raise ValueError("decay_curve must not be empty.")
+
+    if len(np.unique(horizons)) != len(horizons):
+        raise ValueError(
+            "decay_curve must contain exactly one row per horizon."
+        )
+
+    # For valid horizons and ic values
+    finite_mask = np.isfinite(mean_ic)
+
+    if not finite_mask.any():
+        raise ValueError(
+            "decay_curve contains no finite mean IC values."
+        )
+
+    valid_horizons = horizons[finite_mask]
+    valid_abs_ic = np.abs(mean_ic[finite_mask])
+
+    # ----------------------------------
+    # Peak
+    # ----------------------------------
+    peak_idx = int(np.argmax(valid_abs_ic))
+
+    peak_horizon = int(valid_horizons[peak_idx])
+    peak_abs_ic = float(valid_abs_ic[peak_idx])
+
+    # ----------------------------------
+    # Half-life
+    # ----------------------------------
+    halflife_horizon = None
+
+    if not np.isclose(peak_abs_ic, 0.0, atol=1e-12):
+        half_peak = peak_abs_ic / 2
+
+        post_peak_mask = valid_horizons >= peak_horizon
+
+        post_peak_horizons = valid_horizons[post_peak_mask]
+        post_peak_abs_ic = valid_abs_ic[post_peak_mask]
+
+        half_mask = post_peak_abs_ic <= half_peak
+
+        if half_mask.any():
+            halflife_horizon = int(
+                post_peak_horizons[
+                    np.flatnonzero(half_mask)[0]
+                ]
+            )
+
+    # ----------------------------------
+    # Last significant horizon
+    # ----------------------------------
+    significant_horizons = horizons[rejected]
+
+    last_significant_horizon = (
+        int(np.max(significant_horizons))
+        if len(significant_horizons) > 0
+        else None
+    )
+
+    # ----------------------------------
+    # Area under |mean IC|
+    # ----------------------------------
+    if len(valid_horizons) >= 2:
+        auc = float(
+            np.trapezoid(
+                y=valid_abs_ic,
+                x=valid_horizons,
+            )
+        )
+    else:
+        auc = 0.0
+
+    return DecaySummaryResult(
+        peak_horizon=peak_horizon,
+        peak_abs_ic=peak_abs_ic,
+        halflife_horizon=halflife_horizon,
+        last_significant_horizon=last_significant_horizon,
+        auc=auc,
     )
 
 # --------------------------

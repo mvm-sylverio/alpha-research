@@ -2,13 +2,13 @@ import pytest
 import numpy as np
 import pandas as pd
 import polars as pl
-from alpha_research.evaluation.ic import information_coefficient, compute_ic, compute_ic_metrics, ic_summary_table
 from alpha_research.evaluation.ic import (
     compute_ic,
     compute_ic_metrics,
     _generate_target_frames,
     _ic_decay_from_target_frames,
     ic_decay,
+    ic_decay_summary,
     ic_summary_table,
     information_coefficient,
 )
@@ -138,6 +138,15 @@ def decay_features_df_polars(decay_features_df_pandas):
 @pytest.fixture
 def decay_target_data_polars(decay_target_data_pandas):
     return pl.from_pandas(decay_target_data_pandas)
+
+
+@pytest.fixture
+def decay_summary_curve_pandas():
+    return pd.DataFrame({
+        'horizon': [4, 1, 3, 2],
+        'mean': [0.04, 0.10, 0.08, 0.20],
+        'fdr_rejected': [False, False, True, True],
+    })
 
 
 # ------------------------------------------------------
@@ -845,4 +854,108 @@ def test_ic_decay_pandas_polars_consistency(
             polars_result.ic_frames[horizon].to_pandas().reset_index(drop=True),
             check_dtype=False,
         )
+
+
+# ------------------------------------------------------
+# ic_decay_summary
+# ------------------------------------------------------
+def test_ic_decay_summary_identifies_peak_halflife_and_significance(
+        decay_summary_curve_pandas,
+):
+    """Should derive diagnostics from a curve sorted by horizon."""
+    result = ic_decay_summary(decay_summary_curve_pandas)
+
+    assert result.peak_horizon == 2
+    assert result.peak_abs_ic == pytest.approx(0.20)
+    assert result.halflife_horizon == 3
+    assert result.last_significant_horizon == 3
+
+
+def test_ic_decay_summary_returns_none_when_no_horizon_is_significant(
+        decay_summary_curve_pandas,
+):
+    """Should return None when no horizon passes FDR correction."""
+    decay_curve = decay_summary_curve_pandas.assign(fdr_rejected=False)
+
+    result = ic_decay_summary(decay_curve)
+
+    assert result.last_significant_horizon is None
+
+
+def test_ic_decay_summary_returns_none_when_signal_never_reaches_half_peak():
+    """Should return None when no post-peak value reaches half the peak."""
+    decay_curve = pd.DataFrame({
+        'horizon': [1, 2, 3],
+        'mean': [0.20, 0.16, 0.11],
+        'fdr_rejected': [True, True, False],
+    })
+
+    result = ic_decay_summary(decay_curve)
+
+    assert result.peak_horizon == 1
+    assert result.halflife_horizon is None
+
+
+def test_ic_decay_summary_uses_first_peak_when_peak_values_are_equal():
+    """Should use the earliest horizon when absolute peak IC values tie."""
+    decay_curve = pd.DataFrame({
+        'horizon': [1, 2, 3],
+        'mean': [0.10, -0.10, 0.00],
+        'fdr_rejected': [True, True, False],
+    })
+
+    result = ic_decay_summary(decay_curve)
+
+    assert result.peak_horizon == 1
+    assert result.peak_abs_ic == pytest.approx(0.10)
+    assert result.halflife_horizon == 3
+
+
+def test_ic_decay_summary_calculates_trapezoidal_auc():
+    """Should calculate AUC using the horizon values as trapezoid spacing."""
+    decay_curve = pd.DataFrame({
+        'horizon': [1, 2, 4],
+        'mean': [0.40, -0.20, 0.10],
+        'fdr_rejected': [True, True, False],
+    })
+
+    result = ic_decay_summary(decay_curve)
+
+    assert result.auc == pytest.approx(0.60)
+
+
+def test_ic_decay_summary_rejects_empty_curve():
+    """Should reject an empty decay curve."""
+    decay_curve = pd.DataFrame({
+        'horizon': [],
+        'mean': [],
+        'fdr_rejected': [],
+    })
+
+    with pytest.raises(ValueError, match='must not be empty'):
+        ic_decay_summary(decay_curve)
+
+
+def test_ic_decay_summary_rejects_duplicate_horizons():
+    """Should require exactly one row for each horizon."""
+    decay_curve = pd.DataFrame({
+        'horizon': [1, 1],
+        'mean': [0.10, 0.05],
+        'fdr_rejected': [True, False],
+    })
+
+    with pytest.raises(ValueError, match='exactly one row per horizon'):
+        ic_decay_summary(decay_curve)
+
+
+def test_ic_decay_summary_rejects_curve_without_finite_mean_ic_values():
+    """Should reject a curve that contains no usable mean IC values."""
+    decay_curve = pd.DataFrame({
+        'horizon': [1, 2, 3],
+        'mean': [np.nan, np.inf, -np.inf],
+        'fdr_rejected': [False, False, False],
+    })
+
+    with pytest.raises(ValueError, match='no finite mean IC values'):
+        ic_decay_summary(decay_curve)
 
