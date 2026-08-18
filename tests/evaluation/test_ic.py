@@ -9,6 +9,7 @@ from alpha_research.evaluation.ic import (
     _ic_decay_from_target_frames,
     ic_decay,
     ic_decay_summary,
+    ic_decay_summary_table,
     ic_summary_table,
     information_coefficient,
 )
@@ -959,3 +960,171 @@ def test_ic_decay_summary_rejects_curve_without_finite_mean_ic_values():
     with pytest.raises(ValueError, match='no finite mean IC values'):
         ic_decay_summary(decay_curve)
 
+
+# ------------------------------------------------------
+# ic_decay_summary_table
+# ------------------------------------------------------
+def test_ic_decay_summary_table_reuses_targets_for_all_features(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should generate each target once and reuse it for every feature."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    result = ic_decay_summary_table(
+        df_features=decay_features_df_pandas,
+        feature_list=['feature_a', 'feature_b'],
+        target_data=decay_target_data_pandas,
+        horizons=[1, 2],
+        target_fn=target_fn,
+    )
+
+    assert calls == [1, 2]
+
+
+def test_ic_decay_summary_table_rejects_empty_feature_list(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject an empty feature list."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='feature_list must not be empty'):
+        ic_decay_summary_table(
+            df_features=decay_features_df_pandas,
+            feature_list=[],
+            target_data=decay_target_data_pandas,
+            horizons=[1, 2],
+            target_fn=target_fn,
+        )
+
+
+def test_ic_decay_summary_table_returns_expected_columns_and_feature_groups(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should return one summary row per feature with its assigned group."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    result = ic_decay_summary_table(
+        df_features=decay_features_df_pandas,
+        feature_list=['feature_a', 'feature_b'],
+        target_data=decay_target_data_pandas,
+        horizons=[1, 2],
+        target_fn=target_fn,
+        feature_groups={
+            'feature_a': 'momentum',
+            'feature_b': 'reversal',
+        },
+    )
+
+    expected_columns = {
+        'feature',
+        'peak_horizon',
+        'peak_abs_ic',
+        'halflife_horizon',
+        'last_significant_horizon',
+        'auc',
+        'feature_group',
+    }
+
+    assert set(result.table.columns) == expected_columns
+    assert list(result.table['feature']) == ['feature_a', 'feature_b']
+    assert list(result.table['feature_group']) == ['momentum', 'reversal']
+
+
+def test_ic_decay_summary_table_preserves_individual_decay_results(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Stored decay results should match individual ic_decay computations."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    summary_result = ic_decay_summary_table(
+        df_features=decay_features_df_pandas,
+        feature_list=['feature_a', 'feature_b'],
+        target_data=decay_target_data_pandas,
+        horizons=[1, 2],
+        target_fn=target_fn,
+    )
+
+    for feature in ['feature_a', 'feature_b']:
+        expected_result = ic_decay(
+            df_feature=decay_features_df_pandas,
+            feature=feature,
+            target_data=decay_target_data_pandas,
+            horizons=[1, 2],
+            target_fn=target_fn,
+        )
+        actual_result = summary_result.decay_results[feature]
+
+        pd.testing.assert_frame_equal(
+            actual_result.table,
+            expected_result.table,
+        )
+        for horizon in expected_result.ic_frames:
+            pd.testing.assert_frame_equal(
+                actual_result.ic_frames[horizon],
+                expected_result.ic_frames[horizon],
+            )
+
+
+def test_ic_decay_summary_table_pandas_polars_consistency(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+        decay_features_df_polars,
+        decay_target_data_polars,
+):
+    """Should return equivalent summary tables for Pandas and Polars inputs."""
+    def pandas_target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    def polars_target_fn(target_data, horizon):
+        return target_data.select(['time', 'symbol', f'target_{horizon}'])
+
+    pandas_result = ic_decay_summary_table(
+        df_features=decay_features_df_pandas,
+        feature_list=['feature_a', 'feature_b'],
+        target_data=decay_target_data_pandas,
+        horizons=[1, 2],
+        target_fn=pandas_target_fn,
+    )
+    polars_result = ic_decay_summary_table(
+        df_features=decay_features_df_polars,
+        feature_list=['feature_a', 'feature_b'],
+        target_data=decay_target_data_polars,
+        horizons=[1, 2],
+        target_fn=polars_target_fn,
+    )
+
+    pd.testing.assert_frame_equal(
+        pandas_result.table.reset_index(drop=True),
+        polars_result.table.to_pandas().reset_index(drop=True),
+        check_dtype=False,
+    )
+    assert set(pandas_result.decay_results) == set(polars_result.decay_results)
+
+
+def test_ic_decay_summary_table_duplicate_feature_list_raises(
+        decay_features_df_pandas,
+        decay_target_data_pandas,
+):
+    """Should reject duplicate feature names."""
+    def target_fn(target_data, horizon):
+        return target_data[['time', 'symbol', f'target_{horizon}']]
+
+    with pytest.raises(ValueError, match='feature_list must not contain duplicates'):
+        ic_decay_summary_table(
+            df_features=decay_features_df_pandas,
+            feature_list=['feature_a', 'feature_a'],
+            target_data=decay_target_data_pandas,
+            horizons=[1, 2],
+            target_fn=target_fn,
+        )

@@ -8,10 +8,16 @@ from typing import Literal, Callable
 from scipy.stats import pearsonr, spearmanr
 
 from alpha_research.evaluation.statistical_tests import newey_west_tstat, fdr_correction
-from alpha_research._utils import _validate_df, _validate_same_backend
+from alpha_research._utils import (
+    _is_constant_series,
+    _validate_df,
+    _validate_same_backend,
+)
 from alpha_research.features.schema import get_feature_name, join_feature_target_frames
 
-__all__ = ['information_coefficient', 'compute_ic', 'ICMetrics', 'compute_ic_metrics', 'ic_summary_table']
+__all__ = ['information_coefficient', 'compute_ic', 'ICMetrics', 'compute_ic_metrics', 'ic_summary_table', 'ic_decay',
+           'ic_decay_summary', 'ic_decay_summary_table']
+
 DataFrame = pd.DataFrame | pl.DataFrame
 TargetFn = Callable[[DataFrame, int], DataFrame]
 
@@ -873,6 +879,162 @@ def ic_decay_summary(
         last_significant_horizon=last_significant_horizon,
         auc=auc,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ICDecaySummaryTableResult:
+    """
+    Result of ic_decay_summary_table computation.
+
+    Attributes
+    ----------
+    table : pd.DataFrame | pl.DataFrame
+        Scalar decay diagnostics for every feature.
+    decay_results : dict[str, ICDecayResult]
+        Complete decay result for every feature.
+    """
+    table: pd.DataFrame | pl.DataFrame
+    decay_results: dict[str, ICDecayResult]
+
+
+def ic_decay_summary_table(
+        df_features: pd.DataFrame | pl.DataFrame,
+        feature_list: list[str],
+        target_data: pd.DataFrame | pl.DataFrame,
+        horizons: list[int],
+        target_fn: TargetFn,
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        date_column: str = 'time',
+        symbol_column: str = 'symbol',
+        feature_groups: dict[str, str] | None = None,
+        fdr: float = 0.05,
+        fdr_method: Literal['bh', 'by'] = 'bh',
+) -> ICDecaySummaryTableResult:
+    """
+    Compute IC decay diagnostics for multiple columns in a wide DataFrame.
+
+    Each target is generated once per horizon from target_data and reused for
+    every feature. For every feature, the function:
+        1. compute IC at every horizon;
+        2. compute Newey-West statistics;
+        3. apply FDR correction across its horizons;
+        4. summarize the resulting decay curve.
+
+    Parameters
+    ----------
+    df_features : pd.DataFrame or pl.DataFrame
+        Wide feature DataFrame containing date_column, symbol_column, and all
+        feature columns in feature_list.
+    feature_list : list[str]
+        Names of the feature columns in df_features to evaluate. Must not be empty or
+        contain duplicates.
+    target_data : pd.DataFrame or pl.DataFrame
+        DataFrame passed to target_fn to generate each target. It must use the
+        same DataFrame backend as df.
+    horizons : list[int]
+        Forward horizons evaluated for every feature.
+    target_fn : Callable[[pd.DataFrame | pl.DataFrame, int], pd.DataFrame | pl.DataFrame]
+        Target function accepting target_fn(target_data, horizon=horizon).
+    corr_method : {'spearman', 'pearson'}
+        IC correlation method.
+    date_column : str
+        Date/time column.
+    symbol_column : str
+        Asset identifier column.
+    feature_groups : dict[str, str] | None
+        Optional mapping between features and semantic groups.
+    fdr : float
+        False discovery rate.
+    fdr_method : {'bh', 'by'}
+        Multiple-testing correction applied independently to the horizons
+        of each feature.
+
+    Returns
+    -------
+    ICDecaySummaryTableResult
+        table:
+            One row per feature with decay summary diagnostics.
+
+        decay_results:
+            Complete ICDecayResult for every feature.
+
+    Raises
+    ------
+    ValueError
+        If feature_list is empty or contains duplicates, df_features or target_data is
+        invalid, or horizons are invalid.
+    TypeError
+        If df, target_data, or a target returned by target_fn use different
+        DataFrame backends.
+    """
+    if not feature_list:
+        raise ValueError("feature_list must not be empty.")
+
+    if len(set(feature_list)) != len(feature_list):
+        raise ValueError("feature_list must not contain duplicates.")
+
+    _validate_df(df_features, [date_column, symbol_column] + feature_list)
+
+    target_frames = _generate_target_frames(
+        df_feature=df_features,
+        target_data=target_data,
+        horizons=horizons,
+        target_fn=target_fn,
+    )
+
+    rows = []
+    decay_results = {}
+
+    for feature in feature_list:
+        decay_result = _ic_decay_from_target_frames(
+            df_feature=df_features,
+            feature=feature,
+            target_frames=target_frames,
+            corr_method=corr_method,
+            date_column=date_column,
+            symbol_column=symbol_column,
+            feature_groups=feature_groups,
+            fdr=fdr,
+            fdr_method=fdr_method,
+        )
+
+        decay_table = decay_result.table
+
+        if isinstance(decay_table, pd.DataFrame):
+            feature = decay_table['feature'].iloc[0]
+            feature_group = decay_table['feature_group'].iloc[0]
+        else:
+            feature = decay_table['feature'][0]
+            feature_group = decay_table['feature_group'][0]
+
+        summary = ic_decay_summary(decay_table)
+
+        decay_results[feature] = decay_result
+
+        rows.append({
+            'feature': feature,
+
+            'peak_horizon': summary.peak_horizon,
+            'peak_abs_ic': summary.peak_abs_ic,
+            'halflife_horizon': summary.halflife_horizon,
+            'last_significant_horizon': (
+                summary.last_significant_horizon
+            ),
+            'auc': summary.auc,
+
+            'feature_group': feature_group,
+        })
+
+    if isinstance(df_features, pd.DataFrame):
+        table = pd.DataFrame(rows)
+    else:
+        table = pl.DataFrame(rows)
+
+    return ICDecaySummaryTableResult(
+        table=table,
+        decay_results=decay_results,
+    )
+
 
 # --------------------------
 # Plots
