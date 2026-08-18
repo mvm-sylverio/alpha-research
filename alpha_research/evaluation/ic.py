@@ -56,11 +56,14 @@ def information_coefficient(
     Notes
     -----
     Returns nan if either input is constant (undefined correlation).
-    scipy will emit a ConstantInputWarning in this case, which is intentional.
+    Constant inputs are detected before calling scipy.
     """
 
     if len(x) != len(y):
         raise ValueError(f'len(x): {len(x)} != len(y): {len(y)}.')
+
+    if _is_constant_series(x) or _is_constant_series(y):
+        return np.nan
 
     if corr_method == 'pearson':
         return pearsonr(x, y)[0]  # [0] is the correlation coefficient

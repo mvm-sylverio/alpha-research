@@ -180,6 +180,16 @@ def test_ic_invalid_method_raises():
         information_coefficient(x, x, corr_method='kendall')
 
 
+def test_ic_constant_input_returns_nan():
+    """Should return NaN directly when an input Series is constant."""
+    x = pd.Series([1.0, 1.0, 1.0])
+    y = pd.Series([1.0, 2.0, 3.0])
+
+    result = information_coefficient(x, y)
+
+    assert np.isnan(result)
+
+
 # ------------------------------------------------------
 # compute_ic
 # ------------------------------------------------------

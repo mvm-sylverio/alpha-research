@@ -104,6 +104,46 @@ def _is_all_missing(series) -> bool:
     raise TypeError("Unsupported Series type.")
 
 
+def _is_constant_series(series: pd.Series | pl.Series) -> bool:
+    """
+    Check whether a Series has zero or one distinct non-missing values.
+
+    Parameters
+    ----------
+    series : pd.Series | pl.Series
+        Series which will be checked for constant values.
+
+    Returns
+    -------
+    bool
+        True if the Series has at most one distinct non-missing value,
+        False otherwise.
+
+    Raises
+    ------
+    TypeError
+        If series is not a Pandas or Polars Series.
+
+    Notes
+    -----
+    NaN and null values are excluded before evaluating the number of
+    distinct values. A Series with no non-missing values is considered
+    constant.
+    """
+    if isinstance(series, pd.Series):
+        return series.dropna().nunique() <= 1
+
+    if isinstance(series, pl.Series):
+        non_missing = series.drop_nulls()
+
+        if non_missing.dtype.is_float():
+            non_missing = non_missing.drop_nans()
+
+        return non_missing.n_unique() <= 1
+
+    raise TypeError("Unsupported Series type.")
+
+
 def _select_columns(
         df: pd.DataFrame | pl.DataFrame,
         columns: list[str],

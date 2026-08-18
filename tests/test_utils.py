@@ -7,6 +7,7 @@ import numpy as np
 # noinspection PyProtectedMember
 from alpha_research._utils import (
     _is_all_missing,
+    _is_constant_series,
     _select_columns,
     _validate_df,
     _validate_same_backend,
@@ -155,6 +156,43 @@ def test_is_all_missing_invalid_type_raises():
     """Should raise TypeError for unsupported types."""
     with pytest.raises(TypeError):
         _is_all_missing([1, 2, 3])
+
+
+# ------------------------------------------------------
+# _is_constant_series
+# ------------------------------------------------------
+def test_is_constant_series_pandas_constant_values():
+    """Should return True for a Pandas Series with constant values."""
+    series = pd.Series([1.0, 1.0, 1.0])
+
+    assert _is_constant_series(series) is True
+
+
+def test_is_constant_series_pandas_non_constant_values():
+    """Should return False for a Pandas Series with distinct values."""
+    series = pd.Series([1.0, 2.0, 1.0])
+
+    assert _is_constant_series(series) is False
+
+
+def test_is_constant_series_polars_ignores_nan_and_null_values():
+    """Should ignore NaN and null values when checking a Polars Series."""
+    series = pl.Series([1.0, float('nan'), None, 1.0])
+
+    assert _is_constant_series(series) is True
+
+
+def test_is_constant_series_polars_non_constant_values():
+    """Should return False for a Polars Series with distinct values."""
+    series = pl.Series([1.0, 2.0, None])
+
+    assert _is_constant_series(series) is False
+
+
+def test_is_constant_series_invalid_type_raises():
+    """Should raise TypeError for an unsupported Series type."""
+    with pytest.raises(TypeError, match='Unsupported Series type'):
+        _is_constant_series([1.0, 1.0])
 
 
 # ------------------------------------------------------
