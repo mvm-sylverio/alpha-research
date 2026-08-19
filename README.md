@@ -36,7 +36,7 @@ Completed modules are marked; remaining items reflect the planned roadmap.
 - [ ] Event-based sampling (CUSUM filter)
 
 ### Research — "Does the signal exist?"
-Ideally, done on 80-90% of the dataset. 10-20% should be reserved for validation and never used on research.
+- [x] Research-test df split function with purging.
 
 **Foundation — IC Analysis**
 - [x] Cross-sectional Information Coefficient (IC) — Spearman and Pearson
@@ -44,17 +44,14 @@ Ideally, done on 80-90% of the dataset. 10-20% should be reserved for validation
 - [x] Newey-West HAC t-statistic for IC significance
 - [x] IC summary table across feature universe with feature group classification
 - [ ] Rolling IC stability
-- [ ] IC decay analysis
+- [x] IC decay analysis
+- [ ] Plots
 
 **Multiple Testing Correction**
 - [x] Benjamini-Hochberg correction per signal family
 - [x] Benjamini-Yekutieli correction for arbitrary dependence
 
 **Causality — "Is the signal real or spurious? Why does it work?"**
-
-Causality is treated as confirmatory evidence, not an exclusion criterion -
-many robust predictive signals in financial markets lack a fully identified
-causal mechanism.
 
 - [ ] Granger causality — linear filter
 - [ ] PCMCI — causal discovery with multiple confounders
