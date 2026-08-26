@@ -11,6 +11,7 @@ from alpha_research._utils import (
     _select_columns,
     _validate_df,
     _validate_same_backend,
+    _validate_time_order,
     _validate_unique_keys,
 )
 
@@ -311,3 +312,113 @@ def test_validate_unique_keys_rejects_duplicate_polars_keys():
 
     with pytest.raises(ValueError, match='feature_df must contain unique'):
         _validate_unique_keys(df, ['time', 'symbol'], 'feature_df')
+
+
+# ------------------------------------------------------
+# _validate_time_order
+# ------------------------------------------------------
+def test_validate_time_order_accepts_unique_increasing_pandas_times():
+    """Should accept unique, increasing pandas times."""
+    df = pd.DataFrame({
+        'time': pd.to_datetime(['2024-01-01', '2024-01-02', '2024-01-03']),
+    })
+
+    _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_accepts_unique_increasing_polars_times():
+    """Should accept unique, increasing Polars times."""
+    df = pl.DataFrame({
+        'time': [
+            pd.Timestamp('2024-01-01'),
+            pd.Timestamp('2024-01-02'),
+            pd.Timestamp('2024-01-03'),
+        ],
+    })
+
+    _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_accepts_increasing_intraday_times():
+    """Should accept timestamps with increasing hours and minutes."""
+    df = pd.DataFrame({
+        'time': pd.to_datetime([
+            '2024-01-01 09:30:00',
+            '2024-01-01 09:45:00',
+            '2024-01-01 10:00:00',
+        ]),
+    })
+
+    _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_rejects_decreasing_intraday_times():
+    """Should reject timestamps that move backwards within the same day."""
+    df = pd.DataFrame({
+        'time': pd.to_datetime([
+            '2024-01-01 09:30:00',
+            '2024-01-01 10:00:00',
+            '2024-01-01 09:45:00',
+        ]),
+    })
+
+    with pytest.raises(ValueError, match='increasingly ordered'):
+        _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_rejects_duplicate_pandas_times():
+    """Should reject repeated pandas times."""
+    df = pd.DataFrame({
+        'time': pd.to_datetime(['2024-01-01', '2024-01-01', '2024-01-02']),
+    })
+
+    with pytest.raises(ValueError, match='unique'):
+        _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_rejects_duplicate_polars_times():
+    """Should reject repeated Polars times."""
+    df = pl.DataFrame({
+        'time': [
+            pd.Timestamp('2024-01-01'),
+            pd.Timestamp('2024-01-01'),
+            pd.Timestamp('2024-01-02'),
+        ],
+    })
+
+    with pytest.raises(ValueError, match='unique'):
+        _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_rejects_decreasing_pandas_times():
+    """Should reject pandas times that move backwards."""
+    df = pd.DataFrame({
+        'time': pd.to_datetime(['2024-01-01', '2024-01-03', '2024-01-02']),
+    })
+
+    with pytest.raises(ValueError, match='increasingly ordered'):
+        _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_rejects_decreasing_polars_times():
+    """Should reject Polars times that move backwards."""
+    df = pl.DataFrame({
+        'time': [
+            pd.Timestamp('2024-01-01'),
+            pd.Timestamp('2024-01-03'),
+            pd.Timestamp('2024-01-02'),
+        ],
+    })
+
+    with pytest.raises(ValueError, match='increasingly ordered'):
+        _validate_time_order(df, 'time')
+
+
+def test_validate_time_order_rejects_partially_missing_pandas_times():
+    """Should reject missing times even when the column has valid values."""
+    df = pd.DataFrame({
+        'time': pd.to_datetime(['2024-01-01', None, '2024-01-02']),
+    })
+
+    with pytest.raises(ValueError, match='must not contain missing values'):
+        _validate_time_order(df, 'time')
