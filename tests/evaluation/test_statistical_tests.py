@@ -2,10 +2,20 @@ import pytest
 import pandas as pd
 import polars as pl
 import numpy as np
+from scipy.stats import norm
 
-from alpha_research.evaluation.statistical_tests import (newey_west_tstat, NWTestResult, adf_test, ADFTestResult,
-                                                         stationarity_test, fdr_correction, benjamini_hochberg,
-                                                         benjamini_yekutieli)
+from alpha_research.evaluation.statistical_tests import (
+    ADFTestResult,
+    NWTestResult,
+    WaldTemporalAssociationTestResult,
+    adf_test,
+    benjamini_hochberg,
+    benjamini_yekutieli,
+    fdr_correction,
+    newey_west_tstat,
+    stationarity_test,
+    wald_temporal_association_test,
+)
 
 
 # ------------------------------------------------------
@@ -223,6 +233,207 @@ def test_nw_all_nan_series_returns_nan():
     result = newey_west_tstat(pd.Series([np.nan, np.nan, np.nan]))
     assert np.isnan(result.t_stat)
     assert np.isnan(result.p_value)
+
+
+# ------------------------------------------------------
+# wald_temporal_association_test
+# ------------------------------------------------------
+def test_wald_temporal_association_test_returns_result_type():
+    """Should return a WaldTemporalAssociationTestResult instance."""
+    result = wald_temporal_association_test(0.20, 0.05)
+
+    assert isinstance(result, WaldTemporalAssociationTestResult)
+
+
+def test_wald_temporal_association_test_calculates_statistic():
+    """Should standardize the observed association around the null value."""
+    result = wald_temporal_association_test(0.20, 0.05)
+
+    assert result.test_statistic == pytest.approx(4.0)
+
+
+def test_wald_temporal_association_test_calculates_normal_two_sided_p_value():
+    """Should calculate the two-sided p-value from the standard Normal tail."""
+    result = wald_temporal_association_test(0.10, 0.05)
+
+    assert result.p_value == pytest.approx(2 * norm.sf(2.0))
+
+
+@pytest.mark.parametrize(
+    'irrelevant_argument',
+    [
+        'bootstrap_ci_lower',
+        'bootstrap_ci_upper',
+        'n_non_positive',
+        'n_non_negative',
+        'n_bootstraps',
+    ],
+)
+def test_wald_temporal_association_test_does_not_accept_bootstrap_distribution_metrics(
+        irrelevant_argument,
+):
+    """Should depend on the bootstrap standard error, not other bootstrap metrics."""
+    with pytest.raises(TypeError, match='unexpected keyword argument'):
+        wald_temporal_association_test(
+            0.10,
+            0.05,
+            **{irrelevant_argument: 0.0},
+        )
+
+
+def test_wald_temporal_association_test_rejects_positive_association():
+    """Should reject H0 for a sufficiently positive Wald statistic."""
+    result = wald_temporal_association_test(0.20, 0.05)
+
+    assert result.reject_h0 is True
+    assert result.test_statistic == pytest.approx(4.0)
+
+
+def test_wald_temporal_association_test_rejects_negative_association():
+    """Should reject H0 for a sufficiently negative Wald statistic."""
+    result = wald_temporal_association_test(-0.20, 0.05)
+
+    assert result.reject_h0 is True
+    assert result.test_statistic == pytest.approx(-4.0)
+
+
+def test_wald_temporal_association_test_does_not_reject_non_significant_association():
+    """Should not reject H0 when the Normal p-value is large."""
+    result = wald_temporal_association_test(0.02, 0.05)
+
+    assert result.reject_h0 is False
+    assert result.p_value > 0.05
+
+
+def test_wald_temporal_association_test_calculates_wald_confidence_interval():
+    """Should calculate Wald interval bounds from the Normal critical value."""
+    result = wald_temporal_association_test(0.10, 0.05)
+    z_critical = norm.ppf(0.975)
+
+    assert result.wald_ci_lower == pytest.approx(0.10 - z_critical * 0.05)
+    assert result.wald_ci_upper == pytest.approx(0.10 + z_critical * 0.05)
+
+
+@pytest.mark.parametrize('confidence_level', [0.95, 0.90])
+def test_wald_temporal_association_test_uses_confidence_level_for_interval(
+        confidence_level,
+):
+    """Should use the chosen confidence level for alpha and the Wald interval."""
+    result = wald_temporal_association_test(
+        0.10,
+        0.05,
+        confidence_level=confidence_level,
+    )
+    alpha = 1 - confidence_level
+    z_critical = norm.ppf(1 - alpha / 2)
+
+    assert result.alpha == pytest.approx(alpha)
+    assert result.wald_ci_lower == pytest.approx(0.10 - z_critical * 0.05)
+    assert result.wald_ci_upper == pytest.approx(0.10 + z_critical * 0.05)
+
+
+@pytest.mark.parametrize('observed_association, bootstrap_standard_error', [
+    (0.20, 0.05),
+    (-0.20, 0.05),
+    (0.02, 0.05),
+])
+def test_wald_temporal_association_test_p_value_matches_wald_interval_decision(
+        observed_association,
+        bootstrap_standard_error,
+):
+    """Should reject exactly when zero is outside the Wald confidence interval."""
+    result = wald_temporal_association_test(
+        observed_association,
+        bootstrap_standard_error,
+    )
+    null_outside_ci = not (
+        result.wald_ci_lower <= 0.0 <= result.wald_ci_upper
+    )
+
+    assert result.reject_h0 is null_outside_ci
+
+
+def test_wald_temporal_association_test_wald_interval_contains_zero():
+    """Should retain H0 when the Wald interval contains zero."""
+    result = wald_temporal_association_test(0.02, 0.05)
+
+    assert result.wald_ci_lower <= 0.0 <= result.wald_ci_upper
+    assert result.reject_h0 is False
+
+
+def test_wald_temporal_association_test_wald_interval_excludes_zero():
+    """Should reject H0 when the Wald interval excludes zero."""
+    result = wald_temporal_association_test(0.20, 0.05)
+
+    assert not result.wald_ci_lower <= 0.0 <= result.wald_ci_upper
+    assert result.reject_h0 is True
+
+
+def test_wald_temporal_association_test_uses_null_value():
+    """Should center the statistic and Wald interval around a non-zero null value."""
+    result = wald_temporal_association_test(0.30, 0.05, null_value=0.20)
+
+    assert result.test_statistic == pytest.approx(2.0)
+    assert result.p_value == pytest.approx(2 * norm.sf(2.0))
+    assert result.reject_h0 is True
+
+
+@pytest.mark.parametrize('observed_association', [np.nan, np.inf, -np.inf])
+def test_wald_temporal_association_test_rejects_non_finite_observed_association(
+        observed_association,
+):
+    """Should reject non-finite associations from the original sample."""
+    with pytest.raises(ValueError, match='must be finite'):
+        wald_temporal_association_test(observed_association, 0.05)
+
+
+@pytest.mark.parametrize('bootstrap_standard_error', [np.nan, np.inf, -np.inf])
+def test_wald_temporal_association_test_rejects_non_finite_standard_error(
+        bootstrap_standard_error,
+):
+    """Should reject non-finite bootstrap standard errors."""
+    with pytest.raises(ValueError, match='must be finite'):
+        wald_temporal_association_test(0.10, bootstrap_standard_error)
+
+
+@pytest.mark.parametrize('null_value', [np.nan, np.inf, -np.inf])
+def test_wald_temporal_association_test_rejects_non_finite_null_value(null_value):
+    """Should reject non-finite null-hypothesis values."""
+    with pytest.raises(ValueError, match='must be finite'):
+        wald_temporal_association_test(0.10, 0.05, null_value=null_value)
+
+
+@pytest.mark.parametrize(
+    'argument',
+    ['observed_association', 'bootstrap_standard_error', 'null_value'],
+)
+def test_wald_temporal_association_test_rejects_non_numeric_values(argument):
+    """Should reject non-numeric association, standard error, and null values."""
+    kwargs = {
+        'observed_association': 0.10,
+        'bootstrap_standard_error': 0.05,
+        'null_value': 0.0,
+    }
+    kwargs[argument] = 'invalid'
+
+    with pytest.raises(ValueError, match='must be numeric'):
+        wald_temporal_association_test(**kwargs)
+
+
+@pytest.mark.parametrize('confidence_level', [0.0, 1.0, -0.1, 1.1, True])
+def test_wald_temporal_association_test_rejects_invalid_confidence_level(confidence_level):
+    """Should reject confidence levels outside the open interval from zero to one."""
+    with pytest.raises(ValueError, match='confidence_level'):
+        wald_temporal_association_test(0.10, 0.05, confidence_level)
+
+
+@pytest.mark.parametrize('bootstrap_standard_error', [0.0, -0.01])
+def test_wald_temporal_association_test_rejects_non_positive_standard_error(
+        bootstrap_standard_error,
+):
+    """Should reject zero or negative standard errors that make Wald inference invalid."""
+    with pytest.raises(ValueError, match='greater than zero'):
+        wald_temporal_association_test(0.10, bootstrap_standard_error)
 
 
 # ------------------------------------------------------
