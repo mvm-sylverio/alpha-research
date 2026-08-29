@@ -1,5 +1,6 @@
 import pandas as pd
 import polars as pl
+import numpy as np
 
 
 def _validate_df_type(df: pd.DataFrame | pl.DataFrame):
@@ -307,3 +308,29 @@ def _validate_time_order(
 
     if not is_ordered:
         raise ValueError(f'{time_col} must be increasingly ordered.')
+
+
+def _validate_positive_integer(value: int, name: str) -> None:
+    """
+    Validate that a named argument is a positive integer.
+
+    Parameters
+    ----------
+    value : int
+        Value to validate. Boolean values are rejected even though bool is an
+        integer subclass in Python.
+    name : str
+        Argument name included in the error message.
+
+    Returns
+    -------
+    None
+        This function returns None when value is a valid positive integer.
+
+    Raises
+    ------
+    ValueError
+        If value is not an integer, is a boolean, or is less than one.
+    """
+    if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f'{name} must be a positive integer.')

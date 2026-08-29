@@ -10,6 +10,7 @@ from alpha_research._utils import (
     _is_constant_series,
     _select_columns,
     _validate_df,
+    _validate_positive_integer,
     _validate_same_backend,
     _validate_time_order,
     _validate_unique_keys,
@@ -422,3 +423,19 @@ def test_validate_time_order_rejects_partially_missing_pandas_times():
 
     with pytest.raises(ValueError, match='must not contain missing values'):
         _validate_time_order(df, 'time')
+
+
+# ------------------------------------------------------
+# _validate_positive_integer
+# ------------------------------------------------------
+def test_validate_positive_integer_accepts_positive_integer():
+    """Should accept Python and NumPy positive integers."""
+    _validate_positive_integer(1, 'value')
+    _validate_positive_integer(np.int64(2), 'value')
+
+
+@pytest.mark.parametrize('value', [0, -1, True, 1.0, '1'])
+def test_validate_positive_integer_rejects_invalid_values(value):
+    """Should reject non-positive, boolean, and noninteger values."""
+    with pytest.raises(ValueError, match='value must be a positive integer'):
+        _validate_positive_integer(value, 'value')
