@@ -7,12 +7,14 @@ import numpy as np
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.multitest import multipletests
+from scipy.stats import norm
 import math
 
 from alpha_research._utils import _validate_df
 
 __all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult', 'fdr_correction',
-           'benjamini_hochberg', 'benjamini_yekutieli']
+           'benjamini_hochberg', 'benjamini_yekutieli', 'WaldTemporalAssociationTestResult',
+           'wald_temporal_association_test']
 
 
 # ------------------------------------------------------
@@ -113,6 +115,148 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
     return NWTestResult(
         t_stat=float(results.tvalues[0]),
         p_value=float(results.pvalues[0])
+    )
+
+
+# ------------------------------------------------------
+# Temporal association null-hypothesis test
+# ------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class WaldTemporalAssociationTestResult:
+    """
+    Result of a two-sided Wald test for a temporal association.
+
+    Attributes
+    ----------
+    test_statistic : float
+        Wald statistic standardized by the bootstrap standard error.
+    p_value : float
+        Two-sided p-value from the standard Normal distribution.
+    reject_h0 : bool
+        Whether p_value is strictly less than alpha.
+    wald_ci_lower : float
+        Lower bound of the Wald confidence interval.
+    wald_ci_upper : float
+        Upper bound of the Wald confidence interval.
+    confidence_level : float
+        Confidence level used to define alpha.
+    alpha : float
+        Significance level equal to 1 - confidence_level.
+    """
+    test_statistic: float
+    p_value: float
+    reject_h0: bool
+    wald_ci_lower: float
+    wald_ci_upper: float
+    confidence_level: float
+    alpha: float
+
+
+def wald_temporal_association_test(
+        observed_association: float,
+        bootstrap_standard_error: float,
+        confidence_level: float = 0.95,
+        null_value: float = 0.0,
+) -> WaldTemporalAssociationTestResult:
+    """
+    Test H0: rho = null_value against H1: rho != null_value.
+
+    This is a two-sided Wald test for the population temporal association.
+    The Wald statistic is
+
+        (estimate - null_value) / estimated_standard_error
+
+    where the standard error is estimated previously using Moving Block
+    Bootstrap (MBB). MBB estimates uncertainty while preserving local temporal
+    dependence. Under the asymptotic conditions of the Wald test, the
+    standardized statistic converges to N(0, 1) under H0, so the two-sided
+    p-value is obtained from the standard Normal distribution.
+
+    The associated Wald confidence interval is
+
+        estimate +/- z_critical * bootstrap_standard_error
+
+    For a two-sided test, rejecting H0 by the p-value is equivalent to the
+    null value falling outside this Wald interval. This interval is distinct
+    from a percentile bootstrap confidence interval; the latter is not used
+    to calculate the Wald p-value or decision.
+
+    Rejecting H0 indicates statistical evidence that the temporal association
+    differs from the null value. It does not by itself establish economic
+    alpha, temporal stability, or profitability.
+
+    Parameters
+    ----------
+    observed_association : float
+        Temporal association calculated from the original, non-bootstrap sample.
+    bootstrap_standard_error : float
+        Standard error of the observed association estimated from a previously
+        computed Moving Block Bootstrap distribution.
+    confidence_level : float, default 0.95
+        Confidence level defining alpha = 1 - confidence_level.
+    null_value : float, default 0.0
+        Association value specified by the null hypothesis.
+
+    Returns
+    -------
+    WaldTemporalAssociationTestResult
+        Wald statistic, Normal p-value, hypothesis decision, Wald confidence
+        interval, and significance level.
+
+    Raises
+    ------
+    ValueError
+        If inputs are not finite numeric values, confidence_level is outside
+        (0, 1), or bootstrap_standard_error is not strictly positive.
+
+    Notes
+    -----
+    A zero bootstrap standard error makes the Wald statistic undefined and is
+    therefore rejected.
+    """
+    if (
+            not isinstance(confidence_level, (int, float, np.integer, np.floating))
+            or isinstance(confidence_level, bool)
+            or not 0 < confidence_level < 1
+    ):
+        raise ValueError('confidence_level must be strictly between 0 and 1.')
+
+    try:
+        observed, bootstrap_se, null = np.asarray([
+            observed_association,
+            bootstrap_standard_error,
+            null_value,
+        ], dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            'observed_association, bootstrap_standard_error, and null_value '
+            'must be numeric.'
+        ) from error
+
+    if not np.isfinite([observed, bootstrap_se, null]).all():
+        raise ValueError(
+            'observed_association, bootstrap_standard_error, and null_value '
+            'must be finite.'
+        )
+
+    if bootstrap_se <= 0:
+        raise ValueError('bootstrap_standard_error must be greater than zero.')
+
+    alpha = float(1 - confidence_level)
+    test_statistic = float((observed - null) / bootstrap_se)
+    p_value = float(2 * norm.sf(abs(test_statistic)))
+    z_critical = norm.ppf(1 - alpha / 2)
+    wald_ci_lower = float(observed - z_critical * bootstrap_se)
+    wald_ci_upper = float(observed + z_critical * bootstrap_se)
+
+    return WaldTemporalAssociationTestResult(
+        test_statistic=test_statistic,
+        p_value=p_value,
+        reject_h0=bool(p_value < alpha),
+        wald_ci_lower=wald_ci_lower,
+        wald_ci_upper=wald_ci_upper,
+        confidence_level=float(confidence_level),
+        alpha=alpha,
     )
 
 

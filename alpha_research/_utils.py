@@ -1,5 +1,6 @@
 import pandas as pd
 import polars as pl
+import numpy as np
 
 
 def _validate_df_type(df: pd.DataFrame | pl.DataFrame):
@@ -252,5 +253,84 @@ def _validate_unique_keys(
 
     if has_duplicates:
         raise ValueError(
-            f'{df_name} must contain unique {keys} pairs.'
+            f'{df_name} must contain unique {keys} key combinations.'
         )
+
+
+def _validate_time_order(
+        df: pd.DataFrame | pl.DataFrame,
+        time_col: str,
+) -> None:
+    """
+    Validate that a DataFrame has unique, increasingly ordered times.
+
+    This validator does not sort the input. Time-series calculations must
+    receive observations in chronological order so that causal operations do
+    not silently use an invalid row order.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        DataFrame containing the time column.
+    time_col : str
+        Name of the time column.
+
+    Raises
+    ------
+    TypeError
+        If df is not a Pandas or Polars DataFrame.
+    KeyError
+        If time_col is not a column of df.
+    ValueError
+        If time_col contains missing values, duplicates, or is not increasingly
+        ordered.
+
+    Notes
+    -----
+    This function validates the single-series temporal contract. Multi-asset
+    callers should validate time order independently within each asset.
+    """
+    _validate_df(df, [time_col])
+    _validate_unique_keys(df, [time_col], 'df')
+
+    time_series = df[time_col]
+
+    if isinstance(df, pd.DataFrame):
+        if time_series.isna().any():
+            raise ValueError(f'{time_col} must not contain missing values.')
+
+        is_ordered = time_series.is_monotonic_increasing
+    else:
+        if time_series.is_null().any():
+            raise ValueError(f'{time_col} must not contain missing values.')
+
+        is_ordered = time_series.is_sorted()
+
+    if not is_ordered:
+        raise ValueError(f'{time_col} must be increasingly ordered.')
+
+
+def _validate_positive_integer(value: int, name: str) -> None:
+    """
+    Validate that a named argument is a positive integer.
+
+    Parameters
+    ----------
+    value : int
+        Value to validate. Boolean values are rejected even though bool is an
+        integer subclass in Python.
+    name : str
+        Argument name included in the error message.
+
+    Returns
+    -------
+    None
+        This function returns None when value is a valid positive integer.
+
+    Raises
+    ------
+    ValueError
+        If value is not an integer, is a boolean, or is less than one.
+    """
+    if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f'{name} must be a positive integer.')
