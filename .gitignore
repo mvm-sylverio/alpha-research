@@ -1,3 +1,6 @@
 /AGENTS.md
 /alpha_research.egg-info/
 /.venv/
+__pycache__/
+*.py[cod]
+.idea/
