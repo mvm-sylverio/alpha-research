@@ -1,149 +1,143 @@
 # alpha-research
-Systematic alpha research framework focused on signal discovery, validation, and robustness.
 
-Inspired by concepts from:
+`alpha-research` is a reusable Python library for quantitative signal research.
+It provides feature and target construction, cross-sectional IC analysis,
+single-asset temporal association diagnostics, and dependency-aware bootstrap
+utilities. It is intentionally independent of databases, orchestration, and
+backtesting applications.
+
+The library supports both Pandas and Polars. Public functions preserve the
+input DataFrame backend whenever practical.
+
+## What it provides
+
+- Feature and target utilities: simple/log returns, forward returns, trend
+  features, and cross-sectional ranking.
+- Research data utilities: feature/target schema helpers and purged
+  train/test splitting.
+- Cross-sectional information coefficient analysis with Pearson or Spearman
+  estimators, IC metrics, Newey-West statistics, FDR correction, and IC decay.
+- Single-asset temporal association with Moving Block Bootstrap (MBB), Wald
+  diagnostics, and bootstrap directional stability.
+- Rolling temporal association with percentile bootstrap bands and a compact
+  Matplotlib diagnostic plot.
+- Resampling utilities for moving-block bootstrap summaries and bootstrap
+  Monte Carlo convergence diagnostics.
+- ADF stationarity testing.
+
+## Installation
+
+Install the library and its core dependencies:
+
+```bash
+pip install -e .
+```
+
+## Cross-sectional IC
+
+Cross-sectional IC measures the association between a feature and a forward
+target across assets at each timestamp. The example below creates one feature,
+joins it to a forward-return target, calculates IC diagnostics, and applies FDR
+correction to the resulting feature family.
+
+```python
+from alpha_research.evaluation.ic import ic_summary_table
+from alpha_research.evaluation.statistical_tests import fdr_correction
+from alpha_research.features.targets import fwd_returns
+from alpha_research.features.trend import price_to_sma_ratio
+
+# ohlcv contains: time, symbol, close
+feature_frame = price_to_sma_ratio(ohlcv, window=20)
+target_frame = fwd_returns(ohlcv, horizon=10)
+
+research_frame = (
+    feature_frame
+    .merge(target_frame, on=['time', 'symbol'])
+    .dropna()
+)
+
+ic_result = ic_summary_table(
+    research_frame,
+    feature_list=['price_to_sma_ratio_20'],
+    target='fwd_ret_10',
+    feature_groups={'price_to_sma_ratio_20': 'trend'},
+)
+ic_table = fdr_correction(ic_result.table, method='bh')
+```
+
+`ic_result.ic_frames` retains the per-date IC series used by the summary.
+
+## Single-asset temporal association
+
+Temporal association measures feature-target correlation through time for one
+asset. It is distinct from cross-sectional IC: each observation is a paired
+feature and aligned target at one point in time.
+
+The global summary uses MBB, so feature and target are resampled together in
+contiguous blocks rather than as IID observations.
+
+```python
+from alpha_research.evaluation.timeseries import temporal_association_summary_table
+
+# single_asset_frame contains one symbol and: time, symbol, feature, fwd_ret_20
+summary = temporal_association_summary_table(
+    single_asset_frame,
+    feature_list=['feature'],
+    target='fwd_ret_20',
+    block_length=20,
+    n_bootstraps=2_000,
+    corr_method='spearman',
+    random_state=42,
+)
+```
+
+The bootstrap sign proportion is a directional-stability diagnostic. It is not
+a p-value. The Wald statistics in this global summary are separate from the
+percentile bootstrap intervals used by the rolling analysis below.
+
+## Rolling temporal association
+
+`rolling_temporal_association()` evaluates local temporal association in full,
+strict windows. A window with a missing feature-target pair is recorded with a
+status instead of compressing the time axis before block bootstrap.
+
+```python
+from alpha_research.evaluation.timeseries import (
+    plot_rolling_temporal_association,
+    rolling_temporal_association,
+)
+
+rolling_result = rolling_temporal_association(
+    single_asset_frame,
+    feature='feature',
+    target='fwd_ret_20',
+    window_size=252,
+    window_step=20,
+    block_length=20,
+    n_bootstraps=2_000,
+    bootstrap_method='moving_block',
+    confidence_level=0.95,
+    random_state=42,
+)
+
+rolling_frame = rolling_result.rolling_frame
+rolling_summary = rolling_result.summary_table
+ax = plot_rolling_temporal_association(rolling_frame)
+```
+
+Each rolling row contains the observed association, percentile bootstrap bounds,
+bootstrap directional stability, effective bootstrap count, and a computation
+status. The plot function accepts `ax=...`, allowing an application to compose
+the association panel with its own shared-time context panels.
+
+## Scope
+
+This project documents implemented research capabilities rather than a fixed
+roadmap. New methods are added when they fit the library's statistical and
+architectural boundaries.
+
+## References
 
 - *Active Portfolio Management* — Grinold & Kahn
 - *Advances in Financial Machine Learning* — Marcos López de Prado
 - *Machine Learning for Asset Managers* — Marcos López de Prado
-
-## Stack
-
-Python - Pandas - Polars - NumPy - Scipy - Statsmodels
-
-Both Pandas and Polars are supported as backends. Pandas is supported because of its widespread usage in the community and Polars for its performance for bigger tasks. Pandas is treated without index, like polars.
-
-## Pipeline
-Completed modules are marked; remaining items reflect the planned roadmap.
-
-### Pre-Research
-- [ ] Data ingestion
-- [ ] Data cleaning
-- [ ] Volume bars / dollar bars
-- [ ] Exploratory data analysis (EDA)
-- [ ] Feature engineering and preprocessing - continuous implementation - basic are tracked here
-  - **Features** (partial — expanding)
-    - [x] Simple and Log return
-    - [x] Forward return (target)
-    - [x] Price-to-SMA ratio and SMA crossover
-    - [ ] RSI, ATR, realized volatility *(planned)*
-    - [ ] Composite and interaction features *(planned)*
-  - **Preprocessing transformations** (planned)
-    - [x] Rank
-    - [ ] Z-score, winsorization, volatility scaling, volume scaling *(planned)*
-- [x] Stationarity testing (ADF) - for time-series models and fractional differentiation
-- [ ] Triple Barrier Method (labeling) - planned in targets module
-- [ ] Event-based sampling (CUSUM filter)
-
-### Research — "Does the signal exist?"
-- [x] Research-test df split function with purging.
-
-**Foundation — IC Analysis**
-- [x] Cross-sectional Information Coefficient (IC) — Spearman and Pearson
-- [x] IC metrics: mean, stability (IC IR), pct positive, quantiles, signal alignment
-- [x] Newey-West HAC t-statistic for IC significance
-- [x] IC summary table across feature universe with feature group classification
-- [ ] Rolling IC stability
-- [x] IC decay analysis
-- [ ] Plots
-
-**Multiple Testing Correction**
-- [x] Benjamini-Hochberg correction per signal family
-- [x] Benjamini-Yekutieli correction for arbitrary dependence
-
-**Causality — "Is the signal real or spurious? Why does it work?"**
-
-- [ ] Granger causality — linear filter
-- [ ] PCMCI — causal discovery with multiple confounders
-- [ ] Transfer entropy — non-linear relationships
-
-**Purged K-Fold construction**
-- [ ] K-fold split with purging and embargo (López de Prado)
-
-**Structure — "Are features redundant?"**
-- [ ] Feature correlation matrix
-- [ ] Feature clustering (hierarchical, distance-based)
-- [ ] PCA / orthogonalization (optional, for multicollinearity)
-
-**Importance — "Which features really matter?"**
-- [ ] Single Feature Importance (SFI)
-- [ ] Mean Decrease Impurity (MDI)
-- [ ] Mean Decrease Accuracy / Permutation Importance (MDA)
-
-**Interpretability — "Why do they matter and when?"**
-- [ ] SHAP values
-- [ ] Rolling SHAP for regime detection
-
-**Regime Detection**
-- [ ] Hidden Markov Model (HMM) — latent volatility/return states
-- [ ] Changepoint detection — structural distribution shifts
-- [ ] Regime clustering (K-means on volatility and correlation features)
-- [ ] Regime as meta-feature
-
-**Advanced**
-- [ ] Signature features (Rough Path Theory)
-- [ ] Topological Data Analysis (TDA) — persistent homology
-- [ ] Hawkes processes — temporal event clustering
-
-### Out-of-Sample Validation
-Final validation on the held-out period defined at the start of research.
-- [ ] Expanding window walk-forward
-- [ ] IC stability check out-of-sample
-- [ ] Factor regression — residual alpha with t-stat > 2
-
-### Backtesting
-- [ ] Cross-sectional portfolio construction
-- [ ] Metalabeling
-- [ ] Position sizing
-- [ ] Simulated P&L
-- [ ] Turnover analysis
-- [ ] Alpha evaluation
-- [ ] Sharpe ratio
-- [ ] Deflated Sharpe Ratio (DSR)
-
-## Usage
-
-```python
-import pandas as pd
-from alpha_research.features.returns import simple_returns, log_returns
-from alpha_research.features.targets import fwd_returns
-from alpha_research.features.trend import price_to_sma_ratio, sma_crossover
-from alpha_research.features.transformations import cross_sectional_rank
-from alpha_research.evaluation.ic import compute_ic, ic_summary_table
-from alpha_research.evaluation.statistical_tests import benjamini_hochberg
-
-# 1. Compute raw features from OHLCV
-df_ohlcv = pd.DataFrame()  # your OHLCV data
-
-ret_5    = simple_returns(df_ohlcv, horizon=5)
-sma_ratio = price_to_sma_ratio(df_ohlcv, window=20)
-target   = fwd_returns(df_ohlcv, horizon=10)
-
-# 2. Merge features and target into research DataFrame
-df = (ret_5
-    .merge(sma_ratio, on=['time', 'symbol'])
-    .merge(target,    on=['time', 'symbol'])
-    .dropna()
-)
-
-# 3. Apply cross-sectional rank transformation
-df = cross_sectional_rank(df, feature_cols=['simple_ret_5', 'price_to_sma_ratio_20'])
-
-# 4. Compute IC summary table with feature group classification
-feature_groups = {
-    'simple_ret_5_rank': 'momentum',
-    'price_to_sma_ratio_20_rank': 'trend',
-}
-
-table = ic_summary_table(
-    df,
-    feature_list=['simple_ret_5_rank', 'price_to_sma_ratio_20_rank'],
-    target="fwd_ret_10",
-    feature_groups=feature_groups,
-)
-
-# 5. Apply FDR correction per signal family with Benjamini-Hochberg correction
-fdr_corrected_table = benjamini_hochberg(table)
-
-significant_features = fdr_corrected_table[fdr_corrected_table['fdr_rejected']]
-```
