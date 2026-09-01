@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 mt5 = ["MetaTrader5>=5.0.0"]
+viz = ["matplotlib>=3.8.0"]
 dev = [
     "pytest>=7.0.0",
 ]
