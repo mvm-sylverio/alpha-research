@@ -24,19 +24,24 @@ def _validate_df_type(df: pd.DataFrame | pl.DataFrame):
 def _validate_df(
         df: pd.DataFrame | pl.DataFrame,
         required_cols: list[str],
+        check_all_missing: bool = True,
 ) -> None:
     """
     Validate a Dataframe before usage.
 
-    Includes variable type check, columns existence check empty DataFrame
-    and all-NaN/Nulls columns check.
+    Includes variable type check, columns existence check, empty DataFrame
+    check, and optionally an all-NaN/Nulls required-columns check.
 
     Parameters
     ----------
     df : pd.DataFrame | pl.DataFrame
         df which will be validated.
     required_cols : list[str]
-        Columns required to exist in the df
+        Columns required to exist in the df.
+    check_all_missing : bool, default True
+        Whether every required column must contain at least one non-missing
+        value. Set to False for result frames where an all-missing diagnostic
+        column is a valid, explicit outcome.
 
     Raises
     ------
@@ -45,7 +50,8 @@ def _validate_df(
     KeyError
         If columns in required_cols are not columns of the df.
     ValueError
-        If DataFrame is empty or required columns are missing all values.
+        If DataFrame is empty or, when check_all_missing is True, required
+        columns are missing all values.
     """
     # Check DataFrame type
     _validate_df_type(df)
@@ -60,11 +66,12 @@ def _validate_df(
     if missing_cols:
         raise KeyError(f'missing required columns in DataFrame: {missing_cols}.')
 
-    # Check None/NaN values on all columns
-    cols_with_all_missing = [col for col in required_cols if _is_all_missing(df[col])]
+    if check_all_missing:
+        # Check None/NaN values on all columns
+        cols_with_all_missing = [col for col in required_cols if _is_all_missing(df[col])]
 
-    if cols_with_all_missing:
-        raise ValueError(f'required columns in DataFrame missing all values: {cols_with_all_missing}.')
+        if cols_with_all_missing:
+            raise ValueError(f'required columns in DataFrame missing all values: {cols_with_all_missing}.')
 
 
 def _is_all_missing(series) -> bool:
