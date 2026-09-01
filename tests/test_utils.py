@@ -107,6 +107,15 @@ def test_validate_df_multiple_all_missing_reports_all():
         _validate_df(df, required_cols=['a', 'b', 'c'])
 
 
+@pytest.mark.parametrize('df', [
+    pd.DataFrame({'a': [np.nan, np.nan]}),
+    pl.DataFrame({'a': [float('nan'), None]}),
+])
+def test_validate_df_can_allow_all_missing_required_columns(df):
+    """Should still validate type and schema when result diagnostics are all missing."""
+    _validate_df(df, required_cols=['a'], check_all_missing=False)
+
+
 # ------------------------------------------------------
 # _is_all_missing
 # ------------------------------------------------------

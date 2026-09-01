@@ -1,11 +1,20 @@
+import builtins
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
 
 from alpha_research.evaluation.timeseries import (
+    _rolling_random_states,
+    _rolling_summary_pandas,
     _select_valid_temporal_pairs,
+    _slice_rows,
     _validate_single_symbol,
+    plot_rolling_temporal_association,
+    RollingTemporalAssociationResult,
+    rolling_temporal_association,
+    summarize_rolling_temporal_association,
     temporal_association,
     temporal_association_summary_table,
 )
@@ -51,6 +60,27 @@ def temporal_summary_df_pandas():
 @pytest.fixture
 def temporal_summary_df_polars(temporal_summary_df_pandas):
     return pl.from_pandas(temporal_summary_df_pandas)
+
+
+@pytest.fixture
+def rolling_temporal_df_pandas():
+    return pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=12, freq='D'),
+        'symbol': ['AAPL'] * 12,
+        'feature': [
+            0.2, -0.4, 0.1, -0.3, 0.6, -0.1,
+            0.4, -0.5, 0.0, 0.3, -0.2, 0.5,
+        ],
+        'target': [
+            0.4, -0.2, 0.3, -0.1, 0.5, -0.4,
+            0.2, -0.3, 0.1, 0.6, -0.5, 0.0,
+        ],
+    })
+
+
+@pytest.fixture
+def rolling_temporal_df_polars(rolling_temporal_df_pandas):
+    return pl.from_pandas(rolling_temporal_df_pandas)
 
 
 # ------------------------------------------------------
@@ -226,6 +256,718 @@ def test_temporal_association_pandas_polars_consistency(
     polars_result = temporal_association(temporal_df_polars, 'feature', 'target')
 
     assert pandas_result == pytest.approx(polars_result)
+
+
+# ------------------------------------------------------
+# _slice_rows
+# ------------------------------------------------------
+def test_slice_rows_preserves_pandas_backend_order_and_bounds(
+        rolling_temporal_df_pandas,
+):
+    """Should select the requested half-open Pandas positional interval."""
+    result = _slice_rows(rolling_temporal_df_pandas, start=2, stop=5)
+
+    assert isinstance(result, pd.DataFrame)
+    assert result.index.to_list() == [2, 3, 4]
+    assert result['feature'].to_list() == [0.1, -0.3, 0.6]
+
+
+def test_slice_rows_preserves_polars_backend_order_and_bounds(
+        rolling_temporal_df_polars,
+):
+    """Should select the requested half-open Polars positional interval."""
+    result = _slice_rows(rolling_temporal_df_polars, start=2, stop=5)
+
+    assert isinstance(result, pl.DataFrame)
+    assert result['feature'].to_list() == [0.1, -0.3, 0.6]
+
+# ------------------------------------------------------
+# _rolling_random_states
+# ------------------------------------------------------
+def test_rolling_random_states_returns_none_for_each_unseeded_window():
+    """Should preserve non-deterministic bootstrap behavior without a root seed."""
+    assert _rolling_random_states(n_windows=3, random_state=None) == [None, None, None]
+
+
+def test_rolling_random_states_is_deterministic_and_distinct_per_window():
+    """Should derive reproducible child seeds instead of reusing one seed."""
+    first = _rolling_random_states(n_windows=3, random_state=42)
+    second = _rolling_random_states(n_windows=3, random_state=42)
+
+    assert first == second
+    assert len(set(first)) == 3
+
+
+@pytest.mark.parametrize('random_state', ['42', 1.5, True])
+def test_rolling_random_states_rejects_invalid_root_seed(random_state):
+    """Should reject values that NumPy could otherwise coerce ambiguously."""
+    with pytest.raises(TypeError, match='random_state'):
+        _rolling_random_states(n_windows=3, random_state=random_state)
+
+
+# ------------------------------------------------------
+# _rolling_summary_pandas
+# ------------------------------------------------------
+def test_rolling_summary_pandas_excludes_invalid_rows_from_metrics():
+    """Should retain invalid-window counts but exclude them from numeric summaries."""
+    frame = pd.DataFrame({
+        'symbol': ['AAPL', 'AAPL', 'AAPL'],
+        'feature': ['feature'] * 3,
+        'target': ['target'] * 3,
+        'corr_method': ['spearman'] * 3,
+        'bootstrap_method': ['moving_block'] * 3,
+        'window_end': pd.date_range('2024-01-03', periods=3, freq='D'),
+        'association': [0.2, -0.1, np.nan],
+        'bootstrap_ci_lower': [0.1, -0.2, np.nan],
+        'bootstrap_ci_upper': [0.3, -0.05, np.nan],
+        'bootstrap_pct_positive': [0.95, 0.05, np.nan],
+        'status': ['ok', 'ok', 'missing_pairs'],
+    })
+
+    summary = _rolling_summary_pandas(frame).iloc[0]
+
+    assert summary['n_windows'] == 3
+    assert summary['n_valid_windows'] == 2
+    assert summary['n_invalid_windows'] == 1
+    assert summary['association_mean'] == pytest.approx(0.05)
+    assert summary['ci_pct_strictly_positive'] == pytest.approx(0.5)
+    assert summary['ci_pct_strictly_negative'] == pytest.approx(0.5)
+    assert summary['ci_pct_contains_zero'] == pytest.approx(0.0)
+    assert summary['mean_bootstrap_pct_positive'] == pytest.approx(0.5)
+
+
+# ------------------------------------------------------
+# rolling_temporal_association
+# ------------------------------------------------------
+def test_rolling_temporal_association_returns_requested_windows_and_metrics(
+        rolling_temporal_df_pandas,
+):
+    """Should calculate bootstrap diagnostics for every requested full window."""
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        window_step=3,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+    )
+
+    frame = result.rolling_frame
+    assert isinstance(result, RollingTemporalAssociationResult)
+    assert list(frame['window_end']) == list(
+        rolling_temporal_df_pandas['time'].iloc[[5, 8, 11]],
+    )
+    assert list(frame['window_start']) == list(
+        rolling_temporal_df_pandas['time'].iloc[[0, 3, 6]],
+    )
+    assert set(frame['bootstrap_method']) == {'moving_block'}
+    assert set(frame['status']) == {'ok'}
+    assert frame['n_obs'].to_list() == [6, 6, 6]
+    assert (frame['n_bootstraps'] == 20).all()
+    assert np.isfinite(frame['association']).all()
+    assert np.isfinite(frame['bootstrap_ci_lower']).all()
+    assert np.isfinite(frame['bootstrap_ci_upper']).all()
+    assert (frame['bootstrap_ci_lower'] <= frame['bootstrap_ci_upper']).all()
+
+
+def test_rolling_temporal_association_matches_direct_window_estimate(
+        rolling_temporal_df_pandas,
+):
+    """Should use the same association estimator as a direct temporal window."""
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+    )
+    expected = temporal_association(
+        rolling_temporal_df_pandas.iloc[:6],
+        feature='feature',
+        target='target',
+    )
+
+    assert result.rolling_frame['association'].iloc[0] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('corr_method', ['pearson', 'spearman'])
+def test_rolling_temporal_association_supports_established_correlation_methods(
+        rolling_temporal_df_pandas,
+        corr_method,
+):
+    """Should apply the requested estimator consistently to each window."""
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        corr_method=corr_method,
+        random_state=42,
+    )
+    expected = temporal_association(
+        rolling_temporal_df_pandas.iloc[:6],
+        feature='feature',
+        target='target',
+        corr_method=corr_method,
+    )
+
+    assert result.rolling_frame['association'].iloc[0] == pytest.approx(expected)
+    assert set(result.rolling_frame['corr_method']) == {corr_method}
+
+
+def test_rolling_temporal_association_marks_missing_pairs_without_compressing_time(
+        rolling_temporal_df_pandas,
+):
+    """Should not bootstrap a window after a missing internal pair is dropped."""
+    df = rolling_temporal_df_pandas.copy()
+    df.loc[4, 'target'] = np.nan
+
+    result = rolling_temporal_association(
+        df,
+        feature='feature',
+        target='target',
+        window_size=4,
+        block_length=2,
+        n_bootstraps=20,
+        random_state=42,
+    )
+    frame = result.rolling_frame
+    missing_rows = frame[frame['status'] == 'missing_pairs']
+
+    assert len(missing_rows) == 4
+    assert set(missing_rows['n_obs']) == {3}
+    assert missing_rows['association'].isna().all()
+    assert (frame['status'] == 'ok').any()
+
+
+def test_rolling_temporal_association_is_reproducible_with_root_seed(
+        rolling_temporal_df_pandas,
+):
+    """Should derive deterministic bootstrap samples for every window."""
+    kwargs = {
+        'feature': 'feature',
+        'target': 'target',
+        'window_size': 6,
+        'block_length': 3,
+        'n_bootstraps': 20,
+        'random_state': 42,
+    }
+
+    first = rolling_temporal_association(rolling_temporal_df_pandas, **kwargs)
+    second = rolling_temporal_association(rolling_temporal_df_pandas, **kwargs)
+
+    pd.testing.assert_frame_equal(first.rolling_frame, second.rolling_frame)
+    pd.testing.assert_frame_equal(first.summary_table, second.summary_table)
+
+
+def test_rolling_temporal_association_passes_bootstrap_step_to_mbb(
+        monkeypatch,
+        rolling_temporal_df_pandas,
+):
+    """Should keep rolling-window cadence distinct from MBB candidate cadence."""
+    observed_steps = []
+    original = generate_moving_blocks
+
+    def capture_bootstrap_step(data, block_length, step):
+        observed_steps.append(step)
+        return original(data, block_length=block_length, step=step)
+
+    monkeypatch.setattr(
+        'alpha_research.evaluation.timeseries.generate_moving_blocks',
+        capture_bootstrap_step,
+    )
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        window_step=3,
+        block_length=3,
+        bootstrap_step=2,
+        n_bootstraps=20,
+        random_state=42,
+    )
+
+    assert observed_steps == [2] * len(result.rolling_frame)
+
+
+def test_rolling_temporal_association_supports_custom_key_columns(
+        rolling_temporal_df_pandas,
+):
+    """Should not require the default time and symbol column names."""
+    df = rolling_temporal_df_pandas.rename(
+        columns={'time': 'timestamp', 'symbol': 'asset'},
+    )
+
+    result = rolling_temporal_association(
+        df,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        time_col='timestamp',
+        symbol_col='asset',
+        random_state=42,
+    )
+
+    assert set(result.rolling_frame['symbol']) == {'AAPL'}
+
+
+def test_rolling_temporal_association_pandas_polars_consistency(
+        rolling_temporal_df_pandas,
+        rolling_temporal_df_polars,
+):
+    """Should preserve rolling diagnostics across supported DataFrame backends."""
+    kwargs = {
+        'feature': 'feature',
+        'target': 'target',
+        'window_size': 6,
+        'block_length': 3,
+        'n_bootstraps': 20,
+        'random_state': 42,
+    }
+    pandas_result = rolling_temporal_association(rolling_temporal_df_pandas, **kwargs)
+    polars_result = rolling_temporal_association(rolling_temporal_df_polars, **kwargs)
+
+    pd.testing.assert_frame_equal(
+        pandas_result.rolling_frame,
+        polars_result.rolling_frame.to_pandas(),
+        check_dtype=False,
+    )
+    pd.testing.assert_frame_equal(
+        pandas_result.summary_table,
+        polars_result.summary_table.to_pandas(),
+        check_dtype=False,
+    )
+
+
+@pytest.mark.parametrize(
+        ('kwargs', 'message'),
+        [
+            ({'bootstrap_method': 'iid'}, 'bootstrap_method'),
+            ({'block_length': 6}, 'block_length'),
+            ({'n_bootstraps': 1}, 'n_bootstraps'),
+        ],
+)
+def test_rolling_temporal_association_rejects_invalid_bootstrap_configuration(
+        rolling_temporal_df_pandas,
+        kwargs,
+        message,
+):
+    """Should require MBB with enough independent uncertainty diagnostics."""
+    base_kwargs = {
+        'feature': 'feature',
+        'target': 'target',
+        'window_size': 6,
+        'block_length': 3,
+        'n_bootstraps': 20,
+    }
+    base_kwargs.update(kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        rolling_temporal_association(rolling_temporal_df_pandas, **base_kwargs)
+
+
+@pytest.mark.parametrize(
+        ('kwargs', 'message'),
+        [
+            ({'window_size': 0}, 'window_size'),
+            ({'window_step': 0}, 'window_step'),
+            ({'block_length': 0}, 'block_length'),
+            ({'bootstrap_step': 0}, 'bootstrap_step'),
+            ({'n_bootstraps': 0}, 'n_bootstraps'),
+        ],
+)
+def test_rolling_temporal_association_rejects_non_positive_sizing_arguments(
+        rolling_temporal_df_pandas,
+        kwargs,
+        message,
+):
+    """Should validate every rolling and MBB sizing argument before execution."""
+    base_kwargs = {
+        'feature': 'feature',
+        'target': 'target',
+        'window_size': 6,
+        'block_length': 3,
+        'n_bootstraps': 20,
+    }
+    base_kwargs.update(kwargs)
+
+    with pytest.raises(ValueError, match=message):
+        rolling_temporal_association(rolling_temporal_df_pandas, **base_kwargs)
+
+
+def test_rolling_temporal_association_rejects_oversized_window(
+        rolling_temporal_df_pandas,
+):
+    """Should reject a window that cannot be formed from the input history."""
+    with pytest.raises(ValueError, match='window_size'):
+        rolling_temporal_association(
+            rolling_temporal_df_pandas,
+            feature='feature',
+            target='target',
+            window_size=13,
+            block_length=3,
+            n_bootstraps=20,
+        )
+
+
+def test_rolling_temporal_association_rejects_non_dataframe_input():
+    """Should use the shared DataFrame type validation at the public boundary."""
+    with pytest.raises(TypeError, match='DataFrame'):
+        rolling_temporal_association(
+            [{'time': '2024-01-01'}],
+            feature='feature',
+            target='target',
+            window_size=6,
+            block_length=3,
+            n_bootstraps=20,
+        )
+
+
+@pytest.mark.parametrize('random_state', ['42', 1.5, True])
+def test_rolling_temporal_association_rejects_invalid_root_seed(
+        rolling_temporal_df_pandas,
+        random_state,
+):
+    """Should reject a root seed before attempting window-level sampling."""
+    with pytest.raises(TypeError, match='random_state'):
+        rolling_temporal_association(
+            rolling_temporal_df_pandas,
+            feature='feature',
+            target='target',
+            window_size=6,
+            block_length=3,
+            n_bootstraps=20,
+            random_state=random_state,
+        )
+
+
+@pytest.mark.parametrize('confidence_level', [0.0, 1.0])
+def test_rolling_temporal_association_propagates_invalid_confidence_level(
+        rolling_temporal_df_pandas,
+        confidence_level,
+):
+    """Should not silently accept an invalid percentile-bootstrap interval level."""
+    with pytest.raises(ValueError, match='confidence_level'):
+        rolling_temporal_association(
+            rolling_temporal_df_pandas,
+            feature='feature',
+            target='target',
+            window_size=6,
+            block_length=3,
+            n_bootstraps=20,
+            confidence_level=confidence_level,
+        )
+
+
+def test_rolling_temporal_association_propagates_invalid_correlation_method(
+        rolling_temporal_df_pandas,
+):
+    """Should use the established temporal-association estimator validation."""
+    with pytest.raises(ValueError, match='corr_method'):
+        rolling_temporal_association(
+            rolling_temporal_df_pandas,
+            feature='feature',
+            target='target',
+            window_size=6,
+            block_length=3,
+            n_bootstraps=20,
+            corr_method='kendall',
+        )
+
+
+def test_rolling_temporal_association_rejects_invalid_temporal_contract(
+        rolling_temporal_df_pandas,
+):
+    """Should enforce the same single-asset, ordered, unique-time contract."""
+    df = rolling_temporal_df_pandas.copy()
+    df.loc[1, 'time'] = df.loc[0, 'time']
+
+    with pytest.raises(ValueError, match='unique'):
+        rolling_temporal_association(
+            df,
+            feature='feature',
+            target='target',
+            window_size=6,
+            block_length=3,
+            n_bootstraps=20,
+        )
+
+
+def test_rolling_temporal_association_marks_undefined_observed_association(
+        rolling_temporal_df_pandas,
+):
+    """Should expose constant-window correlations as a non-computable status."""
+    df = rolling_temporal_df_pandas.copy()
+    df['feature'] = 1.0
+
+    result = rolling_temporal_association(
+        df,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+    )
+
+    assert set(result.rolling_frame['status']) == {'undefined_association'}
+    assert result.rolling_frame['association'].isna().all()
+
+
+def test_rolling_temporal_association_marks_undefined_bootstrap(
+        monkeypatch,
+        rolling_temporal_df_pandas,
+):
+    """Should preserve observed estimates when bootstrap metrics are undefined."""
+    monkeypatch.setattr(
+        'alpha_research.evaluation.timeseries.bootstrap_metrics',
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError('no finite bootstrap estimates'),
+        ),
+    )
+
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+    )
+
+    assert set(result.rolling_frame['status']) == {'undefined_bootstrap'}
+    assert np.isfinite(result.rolling_frame['association']).all()
+    assert (result.rolling_frame['n_bootstraps'] == 0).all()
+
+
+def test_summarize_rolling_temporal_association_reports_descriptive_counts(
+        rolling_temporal_df_pandas,
+):
+    """Should summarize valid and invalid rolling windows separately."""
+    df = rolling_temporal_df_pandas.copy()
+    df.loc[4, 'target'] = np.nan
+    result = rolling_temporal_association(
+        df,
+        feature='feature',
+        target='target',
+        window_size=4,
+        block_length=2,
+        n_bootstraps=20,
+        random_state=42,
+    )
+
+    summary = summarize_rolling_temporal_association(result.rolling_frame).iloc[0]
+    assert summary['n_windows'] == len(result.rolling_frame)
+    assert summary['n_valid_windows'] == (result.rolling_frame['status'] == 'ok').sum()
+    assert summary['n_invalid_windows'] == (result.rolling_frame['status'] != 'ok').sum()
+
+
+def test_rolling_temporal_association_summarizes_all_invalid_windows(
+        rolling_temporal_df_pandas,
+):
+    """Should return a descriptive summary even when no window is usable."""
+    df = rolling_temporal_df_pandas.copy()
+    df.loc[[0, 3, 6, 9], 'target'] = np.nan
+
+    result = rolling_temporal_association(
+        df,
+        feature='feature',
+        target='target',
+        window_size=4,
+        block_length=2,
+        n_bootstraps=20,
+        random_state=42,
+    )
+    summary = result.summary_table.iloc[0]
+
+    assert summary['n_valid_windows'] == 0
+    assert summary['n_invalid_windows'] == summary['n_windows']
+    assert np.isnan(summary['association_mean'])
+
+
+# ------------------------------------------------------
+# summarize_rolling_temporal_association
+# ------------------------------------------------------
+def test_summarize_rolling_temporal_association_preserves_polars_backend(
+        rolling_temporal_df_pandas,
+):
+    """Should return Polars summaries when the rolling frame is Polars."""
+    result = rolling_temporal_association(
+        pl.from_pandas(rolling_temporal_df_pandas),
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+    )
+
+    summary = summarize_rolling_temporal_association(result.rolling_frame)
+    assert isinstance(summary, pl.DataFrame)
+    assert summary.height == 1
+
+
+@pytest.mark.parametrize(
+        ('rolling_frame', 'error_type', 'message'),
+        [
+            ([{'association': 0.1}], TypeError, 'DataFrame'),
+            (pd.DataFrame(), ValueError, 'must not be empty'),
+            (pd.DataFrame({'association': [0.1]}), KeyError, 'missing required columns'),
+        ],
+)
+def test_summarize_rolling_temporal_association_validates_input_schema(
+        rolling_frame,
+        error_type,
+        message,
+):
+    """Should use the shared DataFrame validator and require its result schema."""
+    with pytest.raises(error_type, match=message):
+        summarize_rolling_temporal_association(rolling_frame)
+
+
+def test_summarize_rolling_temporal_association_allows_all_missing_diagnostics():
+    """Should summarize an explicit all-invalid rolling result instead of rejecting it."""
+    rolling_frame = pd.DataFrame({
+        'symbol': ['AAPL'],
+        'feature': ['feature'],
+        'target': ['target'],
+        'corr_method': ['spearman'],
+        'bootstrap_method': ['moving_block'],
+        'window_end': [pd.Timestamp('2024-01-01')],
+        'association': [np.nan],
+        'bootstrap_ci_lower': [np.nan],
+        'bootstrap_ci_upper': [np.nan],
+        'bootstrap_pct_positive': [np.nan],
+        'status': ['missing_pairs'],
+    })
+
+    summary = summarize_rolling_temporal_association(rolling_frame).iloc[0]
+    assert summary['n_valid_windows'] == 0
+    assert np.isnan(summary['association_mean'])
+
+
+# ------------------------------------------------------
+# plot_rolling_temporal_association
+# ------------------------------------------------------
+@pytest.mark.parametrize('band_alpha', [-0.1, 1.1, '0.2', True])
+def test_plot_rolling_temporal_association_rejects_invalid_band_alpha(
+        rolling_temporal_df_pandas,
+        band_alpha,
+):
+    """Should validate plot opacity before importing the optional backend."""
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+    )
+
+    with pytest.raises(ValueError, match='band_alpha'):
+        plot_rolling_temporal_association(
+            result.rolling_frame,
+            band_alpha=band_alpha,
+        )
+
+
+@pytest.mark.parametrize(
+        ('rolling_frame', 'error_type', 'message'),
+        [
+            ([{'association': 0.1}], TypeError, 'DataFrame'),
+            (pd.DataFrame(), ValueError, 'must not be empty'),
+            (pd.DataFrame({'association': [0.1]}), KeyError, 'missing required columns'),
+        ],
+)
+def test_plot_rolling_temporal_association_validates_input_schema(
+        rolling_frame,
+        error_type,
+        message,
+):
+    """Should reject invalid frames before attempting to import Matplotlib."""
+    with pytest.raises(error_type, match=message):
+        plot_rolling_temporal_association(rolling_frame)
+
+
+def test_plot_rolling_temporal_association_rejects_all_invalid_windows():
+    """Should reject a frame that cannot produce an association line."""
+    rolling_frame = pd.DataFrame({
+        'window_end': [pd.Timestamp('2024-01-01')],
+        'association': [np.nan],
+        'bootstrap_ci_lower': [np.nan],
+        'bootstrap_ci_upper': [np.nan],
+    })
+
+    with pytest.raises(ValueError, match='finite association'):
+        plot_rolling_temporal_association(rolling_frame)
+
+
+def test_plot_rolling_temporal_association_explains_missing_optional_backend(
+        monkeypatch,
+        rolling_temporal_df_pandas,
+):
+    """Should fail clearly when importing the optional Matplotlib backend fails."""
+    original_import = builtins.__import__
+
+    def raise_matplotlib_import_error(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == 'matplotlib.pyplot':
+            raise ImportError('simulated missing matplotlib')
+
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, '__import__', raise_matplotlib_import_error)
+
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+    )
+
+    with pytest.raises(ImportError, match=r'alpha-research\[viz\]'):
+        plot_rolling_temporal_association(result.rolling_frame)
+
+
+def test_plot_rolling_temporal_association_composes_on_supplied_axis(
+        rolling_temporal_df_pandas,
+):
+    """Should draw only the association panel into a caller-provided axis."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    result = rolling_temporal_association(
+        rolling_temporal_df_pandas,
+        feature='feature',
+        target='target',
+        window_size=6,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+    )
+    figure, axes = plt.subplots(nrows=2, sharex=True)
+    returned_axis = plot_rolling_temporal_association(
+        result.rolling_frame,
+        ax=axes[0],
+    )
+
+    assert returned_axis is axes[0]
+    assert len(axes[0].lines) == 2
+    assert len(axes[0].collections) == 1
+    assert len(axes[1].lines) == 0
+    plt.close(figure)
 
 
 # ------------------------------------------------------
