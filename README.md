@@ -12,15 +12,17 @@ input DataFrame backend whenever practical.
 ## What it provides
 
 - Feature and target utilities: simple/log returns, forward returns, trend
-  features, and cross-sectional ranking.
+  features, volatility measures including realized volatility and ATR, ADX,
+  and cross-sectional ranking.
 - Research data utilities: feature/target schema helpers and purged
   train/test splitting.
 - Cross-sectional information coefficient analysis with Pearson or Spearman
   estimators, IC metrics, Newey-West statistics, FDR correction, and IC decay.
 - Single-asset temporal association with Moving Block Bootstrap (MBB), Wald
   diagnostics, and bootstrap directional stability.
-- Rolling temporal association with percentile bootstrap bands and a compact
-  Matplotlib diagnostic plot.
+- Rolling temporal association with percentile bootstrap bands.
+- Visualization utilities for rolling temporal association, time-series feature
+  values, and cross-sectional feature summaries.
 - Resampling utilities for moving-block bootstrap summaries and bootstrap
   Monte Carlo convergence diagnostics.
 - ADF stationarity testing.
