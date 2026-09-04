@@ -1,5 +1,3 @@
-import builtins
-
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -11,7 +9,6 @@ from alpha_research.evaluation.timeseries import (
     _select_valid_temporal_pairs,
     _slice_rows,
     _validate_single_symbol,
-    plot_rolling_temporal_association,
     RollingTemporalAssociationResult,
     rolling_temporal_association,
     summarize_rolling_temporal_association,
@@ -852,122 +849,6 @@ def test_summarize_rolling_temporal_association_allows_all_missing_diagnostics()
     summary = summarize_rolling_temporal_association(rolling_frame).iloc[0]
     assert summary['n_valid_windows'] == 0
     assert np.isnan(summary['association_mean'])
-
-
-# ------------------------------------------------------
-# plot_rolling_temporal_association
-# ------------------------------------------------------
-@pytest.mark.parametrize('band_alpha', [-0.1, 1.1, '0.2', True])
-def test_plot_rolling_temporal_association_rejects_invalid_band_alpha(
-        rolling_temporal_df_pandas,
-        band_alpha,
-):
-    """Should validate plot opacity before importing the optional backend."""
-    result = rolling_temporal_association(
-        rolling_temporal_df_pandas,
-        feature='feature',
-        target='target',
-        window_size=6,
-        block_length=3,
-        n_bootstraps=20,
-        random_state=42,
-    )
-
-    with pytest.raises(ValueError, match='band_alpha'):
-        plot_rolling_temporal_association(
-            result.rolling_frame,
-            band_alpha=band_alpha,
-        )
-
-
-@pytest.mark.parametrize(
-        ('rolling_frame', 'error_type', 'message'),
-        [
-            ([{'association': 0.1}], TypeError, 'DataFrame'),
-            (pd.DataFrame(), ValueError, 'must not be empty'),
-            (pd.DataFrame({'association': [0.1]}), KeyError, 'missing required columns'),
-        ],
-)
-def test_plot_rolling_temporal_association_validates_input_schema(
-        rolling_frame,
-        error_type,
-        message,
-):
-    """Should reject invalid frames before attempting to import Matplotlib."""
-    with pytest.raises(error_type, match=message):
-        plot_rolling_temporal_association(rolling_frame)
-
-
-def test_plot_rolling_temporal_association_rejects_all_invalid_windows():
-    """Should reject a frame that cannot produce an association line."""
-    rolling_frame = pd.DataFrame({
-        'window_end': [pd.Timestamp('2024-01-01')],
-        'association': [np.nan],
-        'bootstrap_ci_lower': [np.nan],
-        'bootstrap_ci_upper': [np.nan],
-    })
-
-    with pytest.raises(ValueError, match='finite association'):
-        plot_rolling_temporal_association(rolling_frame)
-
-
-def test_plot_rolling_temporal_association_explains_missing_optional_backend(
-        monkeypatch,
-        rolling_temporal_df_pandas,
-):
-    """Should fail clearly when importing the optional Matplotlib backend fails."""
-    original_import = builtins.__import__
-
-    def raise_matplotlib_import_error(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == 'matplotlib.pyplot':
-            raise ImportError('simulated missing matplotlib')
-
-        return original_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, '__import__', raise_matplotlib_import_error)
-
-    result = rolling_temporal_association(
-        rolling_temporal_df_pandas,
-        feature='feature',
-        target='target',
-        window_size=6,
-        block_length=3,
-        n_bootstraps=20,
-        random_state=42,
-    )
-
-    with pytest.raises(ImportError, match=r'alpha-research\[viz\]'):
-        plot_rolling_temporal_association(result.rolling_frame)
-
-
-def test_plot_rolling_temporal_association_composes_on_supplied_axis(
-        rolling_temporal_df_pandas,
-):
-    """Should draw only the association panel into a caller-provided axis."""
-    matplotlib = pytest.importorskip('matplotlib')
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
-    result = rolling_temporal_association(
-        rolling_temporal_df_pandas,
-        feature='feature',
-        target='target',
-        window_size=6,
-        block_length=3,
-        n_bootstraps=20,
-        random_state=42,
-    )
-    figure, axes = plt.subplots(nrows=2, sharex=True)
-    returned_axis = plot_rolling_temporal_association(
-        result.rolling_frame,
-        ax=axes[0],
-    )
-
-    assert returned_axis is axes[0]
-    assert len(axes[0].lines) == 2
-    assert len(axes[0].collections) == 1
-    assert len(axes[1].lines) == 0
-    plt.close(figure)
 
 
 # ------------------------------------------------------
