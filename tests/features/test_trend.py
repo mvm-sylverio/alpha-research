@@ -1,8 +1,28 @@
 import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 
-from alpha_research.features.trend import price_to_sma_ratio, sma_crossover
+from alpha_research.features.trend import (
+    adx,
+    average_directional_index,
+    price_to_sma_ratio,
+    sma_crossover,
+)
+
+# -------------------------------------------------------
+# fixtures
+#  ------------------------------------------------------
+@pytest.fixture
+def adx_ohlcv_pandas():
+    """Create a seven-bar series with positive and negative directional moves."""
+    return pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=7, freq='D'),
+        'symbol': ['AAPL'] * 7,
+        'high': [10.0, 12.0, 13.0, 14.0, 15.0, 14.0, 16.0],
+        'low': [8.0, 9.0, 10.0, 11.0, 12.0, 11.0, 13.0],
+        'close': [9.0, 11.0, 12.0, 13.0, 13.0, 12.0, 15.0],
+    })
 
 
 # ------------------------------------------------------
@@ -188,3 +208,86 @@ def test_sma_crossover_invalid_type_raises():
     """Should raise TypeError for unsupported input types."""
     with pytest.raises(TypeError):
         sma_crossover([[1, 2, 3]], fast_window=2, slow_window=3)
+
+
+# ------------------------------------------------------
+# average_directional_index
+# ------------------------------------------------------
+def test_average_directional_index_returns_wilder_adx(adx_ohlcv_pandas):
+    """Should apply two Wilder smoothing stages to Directional Index values."""
+    result = average_directional_index(adx_ohlcv_pandas, window=3)
+
+    assert list(result.columns) == ['time', 'symbol', 'adx_3']
+    assert result['adx_3'].iloc[:5].isna().all()
+    np.testing.assert_allclose(
+        result['adx_3'].iloc[5:].to_numpy(),
+        [80.64516129032258, 76.75194660734148],
+        rtol=1e-12,
+    )
+
+
+def test_average_directional_index_does_not_mix_assets(adx_ohlcv_pandas):
+    """Should maintain separate directional histories for interleaved symbols."""
+    msft = adx_ohlcv_pandas.copy()
+    msft['symbol'] = 'MSFT'
+    msft['high'] = [20.0, 21.0, 24.0, 24.0, 25.0, 23.0, 27.0]
+    msft['low'] = [18.0, 19.0, 20.0, 21.0, 22.0, 20.0, 23.0]
+    msft['close'] = [19.0, 20.0, 22.0, 22.0, 23.0, 21.0, 26.0]
+    multi_asset = pd.concat([adx_ohlcv_pandas, msft]).sort_values(
+        ['time', 'symbol'],
+        ignore_index=True,
+    )
+
+    result = average_directional_index(multi_asset, window=3)
+    for symbol in ['AAPL', 'MSFT']:
+        expected = average_directional_index(
+            multi_asset.loc[multi_asset['symbol'] == symbol],
+            window=3,
+        )['adx_3'].to_numpy()
+        actual = result.loc[result['symbol'] == symbol, 'adx_3'].to_numpy()
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, equal_nan=True)
+
+
+def test_average_directional_index_matches_polars(adx_ohlcv_pandas):
+    """Should preserve ADX values when the input backend is Polars."""
+    pandas_result = average_directional_index(adx_ohlcv_pandas, window=3)
+    polars_result = average_directional_index(
+        pl.from_pandas(adx_ohlcv_pandas),
+        window=3,
+    ).to_pandas()
+
+    np.testing.assert_allclose(
+        pandas_result['adx_3'].to_numpy(),
+        polars_result['adx_3'].to_numpy(),
+        rtol=1e-12,
+        equal_nan=True,
+    )
+
+
+def test_adx_alias_matches_average_directional_index(adx_ohlcv_pandas):
+    """Should provide ADX shorthand alias without changing the calculation."""
+    expected = average_directional_index(adx_ohlcv_pandas, window=3)
+    result = adx(adx_ohlcv_pandas, window=3)
+
+    np.testing.assert_allclose(
+        result['adx_3'].to_numpy(),
+        expected['adx_3'].to_numpy(),
+        rtol=1e-12,
+        equal_nan=True,
+    )
+
+
+@pytest.mark.parametrize('window', [0, -1, True, 1.5])
+def test_average_directional_index_validates_window(adx_ohlcv_pandas, window):
+    """Should require a positive integer Wilder period."""
+    with pytest.raises(ValueError, match='window'):
+        average_directional_index(adx_ohlcv_pandas, window=window)
+
+
+def test_average_directional_index_validates_input(adx_ohlcv_pandas):
+    """Should reject missing OHLC inputs and unsupported DataFrames."""
+    with pytest.raises(KeyError):
+        average_directional_index(adx_ohlcv_pandas.drop(columns='low'), window=3)
+
+    with pytest.raises(TypeError):
+        average_directional_index([[1, 2, 3]], window=3)
