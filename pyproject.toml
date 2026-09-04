@@ -30,3 +30,6 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["alpha_research*"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
