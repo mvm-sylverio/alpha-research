@@ -8,14 +8,20 @@ from alpha_research.evaluation.timeseries import (
     _rolling_summary_pandas,
     _select_valid_temporal_pairs,
     _slice_rows,
+    _temporal_association_decay_from_target_frames,
     _validate_single_symbol,
     RollingTemporalAssociationResult,
+    TemporalAssociationDecayResult,
+    TemporalAssociationDecaySummaryTableResult,
     rolling_temporal_association,
     summarize_rolling_temporal_association,
     temporal_association,
+    temporal_association_decay,
+    temporal_association_decay_summary,
+    temporal_association_decay_summary_table,
     temporal_association_summary_table,
 )
-from alpha_research.evaluation.ic import information_coefficient
+from alpha_research.evaluation.ic import _generate_target_frames, information_coefficient
 from alpha_research.evaluation.statistical_tests import wald_temporal_association_test
 from alpha_research.resampling.block_bootstrap import (
     BootstrapMetricsResults,
@@ -57,6 +63,24 @@ def temporal_summary_df_pandas():
 @pytest.fixture
 def temporal_summary_df_polars(temporal_summary_df_pandas):
     return pl.from_pandas(temporal_summary_df_pandas)
+
+
+@pytest.fixture
+def temporal_decay_df_pandas():
+    rng = np.random.default_rng(42)
+    target_seed = rng.normal(size=30)
+    return pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=30, freq='D'),
+        'symbol': ['AAPL'] * 30,
+        'feature_a': target_seed + rng.normal(scale=0.4, size=30),
+        'feature_b': -target_seed + rng.normal(scale=0.5, size=30),
+        'target_seed': target_seed,
+    })
+
+
+@pytest.fixture
+def temporal_decay_df_polars(temporal_decay_df_pandas):
+    return pl.from_pandas(temporal_decay_df_pandas)
 
 
 @pytest.fixture
@@ -1129,4 +1153,349 @@ def test_temporal_association_summary_table_rejects_duplicate_features(
             target='target',
             block_length=3,
             n_bootstraps=20,
+        )
+
+
+# ------------------------------------------------------
+# _temporal_association_decay_from_target_frames
+# ------------------------------------------------------
+def test_temporal_association_decay_from_target_frames_reuses_pre_generated_targets(
+        temporal_decay_df_pandas,
+):
+    """Should calculate sorted decay results without regenerating targets."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol']].assign(**{
+            f'target_{horizon}': target_data['target_seed'].shift(-horizon),
+        })
+
+    target_frames = _generate_target_frames(
+        df_feature=temporal_decay_df_pandas,
+        target_data=temporal_decay_df_pandas,
+        horizons=[3, 1],
+        target_fn=target_fn,
+    )
+    result = _temporal_association_decay_from_target_frames(
+        df_feature=temporal_decay_df_pandas,
+        feature='feature_a',
+        target_frames=target_frames,
+        block_length=3,
+        n_bootstraps=20,
+        corr_method='spearman',
+        step=1,
+        confidence_level=0.95,
+        random_state=42,
+        time_col='time',
+        symbol_col='symbol',
+        feature_groups={'feature_a': 'momentum'},
+        fdr=0.05,
+        fdr_method='bh',
+    )
+
+    assert calls == [1, 3]
+    assert result.table['horizon'].to_list() == [1, 3]
+    assert result.table['feature_group'].to_list() == ['momentum', 'momentum']
+
+
+def test_temporal_association_decay_from_target_frames_pandas_polars_consistency(
+        temporal_decay_df_pandas,
+        temporal_decay_df_polars,
+):
+    """Should preserve pre-generated-target decay results across backends."""
+    def pandas_target_fn(target_data, horizon):
+        return target_data[['time', 'symbol']].assign(**{
+            f'target_{horizon}': target_data['target_seed'].shift(-horizon),
+        })
+
+    def polars_target_fn(target_data, horizon):
+        return target_data.select(
+            'time',
+            'symbol',
+            pl.col('target_seed').shift(-horizon).alias(f'target_{horizon}'),
+        )
+
+    pandas_target_frames = _generate_target_frames(
+        df_feature=temporal_decay_df_pandas,
+        target_data=temporal_decay_df_pandas,
+        horizons=[1, 3],
+        target_fn=pandas_target_fn,
+    )
+    polars_target_frames = _generate_target_frames(
+        df_feature=temporal_decay_df_polars,
+        target_data=temporal_decay_df_polars,
+        horizons=[1, 3],
+        target_fn=polars_target_fn,
+    )
+    kwargs = {
+        'feature': 'feature_a',
+        'block_length': 3,
+        'n_bootstraps': 20,
+        'corr_method': 'spearman',
+        'step': 1,
+        'confidence_level': 0.95,
+        'random_state': 42,
+        'time_col': 'time',
+        'symbol_col': 'symbol',
+        'feature_groups': None,
+        'fdr': 0.05,
+        'fdr_method': 'bh',
+    }
+    pandas_result = _temporal_association_decay_from_target_frames(
+        df_feature=temporal_decay_df_pandas,
+        target_frames=pandas_target_frames,
+        **kwargs,
+    ).table
+    polars_result = _temporal_association_decay_from_target_frames(
+        df_feature=temporal_decay_df_polars,
+        target_frames=polars_target_frames,
+        **kwargs,
+    ).table.to_pandas()
+
+    pd.testing.assert_frame_equal(pandas_result, polars_result, check_dtype=False)
+
+
+# ------------------------------------------------------
+# temporal_association_decay
+# ------------------------------------------------------
+def test_temporal_association_decay_returns_horizon_level_mbb_wald_and_fdr_results(
+        temporal_decay_df_pandas,
+):
+    """Should calculate one complete temporal result per sorted horizon."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol']].assign(**{
+            f'target_{horizon}': target_data['target_seed'].shift(-horizon),
+        })
+
+    result = temporal_association_decay(
+        df_feature=temporal_decay_df_pandas,
+        feature='feature_a',
+        target_data=temporal_decay_df_pandas,
+        horizons=[3, 1],
+        target_fn=target_fn,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+        feature_groups={'feature_a': 'momentum'},
+    )
+
+    assert isinstance(result, TemporalAssociationDecayResult)
+    assert calls == [1, 3]
+    assert result.table['horizon'].to_list() == [1, 3]
+    assert result.table['target'].to_list() == ['target_1', 'target_3']
+    assert result.table['n_obs'].to_list() == [29, 27]
+    assert result.table['feature_group'].to_list() == ['momentum', 'momentum']
+    assert {
+        'association', 'bootstrap_mean', 'bootstrap_std',
+        'bootstrap_pct_positive', 'test_statistic', 'p_value', 'reject_h0',
+        'wald_ci_lower', 'wald_ci_upper', 'fdr_rejected',
+        'fdr_corrected_p_value',
+    } <= set(result.table.columns)
+
+
+def test_temporal_association_decay_pandas_polars_consistency(
+        temporal_decay_df_pandas,
+        temporal_decay_df_polars,
+):
+    """Should preserve temporal-decay results across DataFrame backends."""
+    def pandas_target_fn(target_data, horizon):
+        return target_data[['time', 'symbol']].assign(**{
+            f'target_{horizon}': target_data['target_seed'].shift(-horizon),
+        })
+
+    def polars_target_fn(target_data, horizon):
+        return target_data.select(
+            'time',
+            'symbol',
+            pl.col('target_seed').shift(-horizon).alias(f'target_{horizon}'),
+        )
+
+    kwargs = {
+        'feature': 'feature_a',
+        'horizons': [1, 3],
+        'block_length': 3,
+        'n_bootstraps': 20,
+        'random_state': 42,
+    }
+    pandas_result = temporal_association_decay(
+        df_feature=temporal_decay_df_pandas,
+        target_data=temporal_decay_df_pandas,
+        target_fn=pandas_target_fn,
+        **kwargs,
+    ).table
+    polars_result = temporal_association_decay(
+        df_feature=temporal_decay_df_polars,
+        target_data=temporal_decay_df_polars,
+        target_fn=polars_target_fn,
+        **kwargs,
+    ).table.to_pandas()
+
+    pd.testing.assert_frame_equal(pandas_result, polars_result, check_dtype=False)
+
+
+# ------------------------------------------------------
+# temporal_association_decay_summary
+# ------------------------------------------------------
+def test_temporal_association_decay_summary_calculates_known_curve_diagnostics():
+    """Should derive peak, half-life, significance persistence, and area."""
+    decay_curve = pd.DataFrame({
+        'horizon': [20, 5, 10, 30],
+        'association': [0.1, -0.5, 0.3, 0.2],
+        'fdr_rejected': [False, True, False, True],
+    })
+
+    result = temporal_association_decay_summary(decay_curve)
+
+    assert result.peak_horizon == 5
+    assert result.peak_abs_association == pytest.approx(0.5)
+    assert result.halflife_horizon == 20
+    assert result.last_significant_horizon == 30
+    assert result.auc == pytest.approx(5.5)
+
+
+def test_temporal_association_decay_summary_handles_zero_non_significant_curve():
+    """Should report no half-life or significance for a zero-magnitude curve."""
+    result = temporal_association_decay_summary(pd.DataFrame({
+        'horizon': [1, 5],
+        'association': [0.0, 0.0],
+        'fdr_rejected': [False, False],
+    }))
+
+    assert result.peak_horizon == 1
+    assert result.peak_abs_association == 0.0
+    assert result.halflife_horizon is None
+    assert result.last_significant_horizon is None
+    assert result.auc == 0.0
+
+
+# ------------------------------------------------------
+# temporal_association_decay_summary_table
+# ------------------------------------------------------
+def test_temporal_association_decay_summary_table_reuses_targets_for_all_features(
+        temporal_decay_df_pandas,
+):
+    """Should generate each target once while retaining detailed feature results."""
+    calls = []
+
+    def target_fn(target_data, horizon):
+        calls.append(horizon)
+        return target_data[['time', 'symbol']].assign(**{
+            f'target_{horizon}': target_data['target_seed'].shift(-horizon),
+        })
+
+    result = temporal_association_decay_summary_table(
+        df_features=temporal_decay_df_pandas,
+        feature_list=['feature_a', 'feature_b'],
+        target_data=temporal_decay_df_pandas,
+        horizons=[3, 1],
+        target_fn=target_fn,
+        block_length=3,
+        n_bootstraps=20,
+        random_state=42,
+        feature_groups={
+            'feature_a': 'momentum',
+            'feature_b': 'reversal',
+        },
+    )
+
+    assert isinstance(result, TemporalAssociationDecaySummaryTableResult)
+    assert calls == [1, 3]
+    assert result.table['feature'].to_list() == ['feature_a', 'feature_b']
+    assert result.table['feature_group'].to_list() == ['momentum', 'reversal']
+    assert set(result.decay_results) == {'feature_a', 'feature_b'}
+    assert result.decay_results['feature_a'].table['horizon'].to_list() == [1, 3]
+    assert {
+        'feature', 'peak_horizon', 'peak_abs_association',
+        'halflife_horizon', 'last_significant_horizon', 'auc',
+        'feature_group',
+    } == set(result.table.columns)
+
+
+def test_temporal_association_decay_summary_table_rejects_empty_feature_list(
+        temporal_decay_df_pandas,
+):
+    """Should reject an empty feature list before target generation."""
+    with pytest.raises(ValueError, match='feature_list must not be empty'):
+        temporal_association_decay_summary_table(
+            df_features=temporal_decay_df_pandas,
+            feature_list=[],
+            target_data=temporal_decay_df_pandas,
+            horizons=[1],
+            target_fn=lambda data, horizon: data,
+            block_length=3,
+            n_bootstraps=20,
+        )
+
+
+def test_temporal_association_decay_summary_table_rejects_duplicate_features(
+        temporal_decay_df_pandas,
+):
+    """Should reject duplicate features before generating targets."""
+    with pytest.raises(ValueError, match='feature_list must not contain duplicates'):
+        temporal_association_decay_summary_table(
+            df_features=temporal_decay_df_pandas,
+            feature_list=['feature_a', 'feature_a'],
+            target_data=temporal_decay_df_pandas,
+            horizons=[1],
+            target_fn=lambda data, horizon: data,
+            block_length=3,
+            n_bootstraps=20,
+        )
+
+
+def test_temporal_association_decay_summary_table_pandas_polars_consistency(
+        temporal_decay_df_pandas,
+        temporal_decay_df_polars,
+):
+    """Should return equivalent batch temporal-decay results across backends."""
+    def pandas_target_fn(target_data, horizon):
+        return target_data[['time', 'symbol']].assign(**{
+            f'target_{horizon}': target_data['target_seed'].shift(-horizon),
+        })
+
+    def polars_target_fn(target_data, horizon):
+        return target_data.select(
+            'time',
+            'symbol',
+            pl.col('target_seed').shift(-horizon).alias(f'target_{horizon}'),
+        )
+
+    kwargs = {
+        'feature_list': ['feature_a', 'feature_b'],
+        'horizons': [1, 3],
+        'block_length': 3,
+        'n_bootstraps': 20,
+        'random_state': 42,
+        'feature_groups': {
+            'feature_a': 'momentum',
+            'feature_b': 'reversal',
+        },
+    }
+    pandas_result = temporal_association_decay_summary_table(
+        df_features=temporal_decay_df_pandas,
+        target_data=temporal_decay_df_pandas,
+        target_fn=pandas_target_fn,
+        **kwargs,
+    )
+    polars_result = temporal_association_decay_summary_table(
+        df_features=temporal_decay_df_polars,
+        target_data=temporal_decay_df_polars,
+        target_fn=polars_target_fn,
+        **kwargs,
+    )
+
+    pd.testing.assert_frame_equal(
+        pandas_result.table,
+        polars_result.table.to_pandas(),
+        check_dtype=False,
+    )
+    for feature in kwargs['feature_list']:
+        pd.testing.assert_frame_equal(
+            pandas_result.decay_results[feature].table,
+            polars_result.decay_results[feature].table.to_pandas(),
+            check_dtype=False,
         )
