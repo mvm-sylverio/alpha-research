@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -431,6 +431,7 @@ def rolling_temporal_association(
         random_state: int | None = None,
         time_col: str = 'time',
         symbol_col: str = 'symbol',
+        progress_callback: Callable[[], None] | None = None,
 ) -> RollingTemporalAssociationResult:
     """
     Compute bootstrap temporal-association diagnostics in rolling time windows.
@@ -478,6 +479,9 @@ def rolling_temporal_association(
         the end of each window.
     symbol_col : str, default 'symbol'
         Single-asset identifier column.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
+
 
     Returns
     -------
@@ -583,6 +587,8 @@ def rolling_temporal_association(
 
         if len(valid_pairs) != window_size:
             rows.append(row)
+            if progress_callback is not None:
+                progress_callback()
             continue
 
         observed_association = information_coefficient(
@@ -595,6 +601,8 @@ def rolling_temporal_association(
         if not np.isfinite(observed_association):
             row['status'] = 'undefined_association'
             rows.append(row)
+            if progress_callback is not None:
+                progress_callback()
             continue
 
         blocks = generate_moving_blocks(
@@ -625,6 +633,8 @@ def rolling_temporal_association(
         except ValueError:
             row['status'] = 'undefined_bootstrap'
             rows.append(row)
+            if progress_callback is not None:
+                progress_callback()
             continue
 
         row.update({
@@ -635,6 +645,8 @@ def rolling_temporal_association(
             'status': 'ok',
         })
         rows.append(row)
+        if progress_callback is not None:
+            progress_callback()
 
     rolling_pandas = pd.DataFrame(rows)
     if isinstance(df, pd.DataFrame):
@@ -661,6 +673,7 @@ def temporal_association_summary_table(
         time_col: str = 'time',
         symbol_col: str = 'symbol',
         feature_groups: dict[str, str] | None = None,
+        progress_callback: Callable[[], None] | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize bootstrap temporal-association diagnostics for one or more features.
@@ -795,6 +808,8 @@ def temporal_association_summary_table(
             'n_bootstraps': metrics.n_bootstraps,
             'feature_group': feature_group,
         })
+        if progress_callback is not None:
+            progress_callback()
 
     if isinstance(df, pd.DataFrame):
         return pd.DataFrame(rows)
@@ -834,6 +849,7 @@ def temporal_association_decay(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        progress_callback: Callable[[], None] | None = None,
 ) -> TemporalAssociationDecayResult:
     """
     Compute the temporal-association decay curve of one feature.
@@ -886,6 +902,8 @@ def temporal_association_decay(
         False discovery rate for the horizon family.
     fdr_method : {'bh', 'by'}, default 'bh'
         Multiple-testing correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
 
     Returns
     -------
@@ -934,6 +952,7 @@ def temporal_association_decay(
         feature_groups=feature_groups,
         fdr=fdr,
         fdr_method=fdr_method,
+        progress_callback=progress_callback,
     )
 
 
@@ -952,6 +971,7 @@ def _temporal_association_decay_from_target_frames(
         feature_groups: dict[str, str] | None,
         fdr: float,
         fdr_method: Literal['bh', 'by'],
+        progress_callback: Callable[[], None] | None = None,
 ) -> TemporalAssociationDecayResult:
     """
     Compute one feature's temporal-association decay from generated targets.
@@ -987,6 +1007,8 @@ def _temporal_association_decay_from_target_frames(
         False discovery rate across horizons.
     fdr_method : {'bh', 'by'}
         FDR correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
 
     Returns
     -------
@@ -1060,6 +1082,8 @@ def _temporal_association_decay_from_target_frames(
             'target': target_col,
             'horizon': horizon,
         })
+        if progress_callback is not None:
+            progress_callback()
 
     if isinstance(df_feature, pd.DataFrame):
         result_table = pd.DataFrame(rows)
@@ -1234,6 +1258,7 @@ def temporal_association_decay_summary_table(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        progress_callback: Callable[[], None] | None = None,
 ) -> TemporalAssociationDecaySummaryTableResult:
     """
     Compute temporal-association decay diagnostics for multiple features.
@@ -1277,6 +1302,9 @@ def temporal_association_decay_summary_table(
         False discovery rate per feature across its horizons.
     fdr_method : {'bh', 'by'}, default 'bh'
         Multiple-testing correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after every completed feature-horizon
+        estimate.
 
     Returns
     -------
@@ -1333,6 +1361,7 @@ def temporal_association_decay_summary_table(
             feature_groups=feature_groups,
             fdr=fdr,
             fdr_method=fdr_method,
+            progress_callback=progress_callback,
         )
         decay_table = decay_result.table
         if isinstance(decay_table, pd.DataFrame):

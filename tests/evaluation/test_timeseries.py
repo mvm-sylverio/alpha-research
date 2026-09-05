@@ -1164,6 +1164,7 @@ def test_temporal_association_decay_from_target_frames_reuses_pre_generated_targ
 ):
     """Should calculate sorted decay results without regenerating targets."""
     calls = []
+    completed_horizons = []
 
     def target_fn(target_data, horizon):
         calls.append(horizon)
@@ -1192,9 +1193,11 @@ def test_temporal_association_decay_from_target_frames_reuses_pre_generated_targ
         feature_groups={'feature_a': 'momentum'},
         fdr=0.05,
         fdr_method='bh',
+        progress_callback=lambda: completed_horizons.append(True),
     )
 
     assert calls == [1, 3]
+    assert len(completed_horizons) == 2
     assert result.table['horizon'].to_list() == [1, 3]
     assert result.table['feature_group'].to_list() == ['momentum', 'momentum']
 
