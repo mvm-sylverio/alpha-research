@@ -1,8 +1,11 @@
+"""Market-data constants used by the data-ingestion modules."""
+
 import MetaTrader5 as mt5
 
 
-# Dict converting str timeframes to MT5 timeframes
-str_tf_to_mt5_tf = {
+# Mapping from the public string representation of a timeframe to its MT5
+# constant. The keys follow the notation accepted by ingestion functions.
+str_tf_to_mt5_tf: dict[str, int] = {
     "M1": mt5.TIMEFRAME_M1,
     "M2": mt5.TIMEFRAME_M2,
     "M3": mt5.TIMEFRAME_M3,

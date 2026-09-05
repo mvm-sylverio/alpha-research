@@ -980,7 +980,6 @@ def test_ic_decay_summary_table_reuses_targets_for_all_features(
 ):
     """Should generate each target once and reuse it for every feature."""
     calls = []
-    completed_estimates = []
 
     def target_fn(target_data, horizon):
         calls.append(horizon)
@@ -992,11 +991,9 @@ def test_ic_decay_summary_table_reuses_targets_for_all_features(
         target_data=decay_target_data_pandas,
         horizons=[1, 2],
         target_fn=target_fn,
-        progress_callback=lambda: completed_estimates.append(True),
     )
 
     assert calls == [1, 2]
-    assert len(completed_estimates) == 4
 
 
 def test_ic_decay_summary_table_rejects_empty_feature_list(

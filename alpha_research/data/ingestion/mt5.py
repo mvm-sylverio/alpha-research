@@ -1,13 +1,30 @@
+"""MetaTrader 5 market-data ingestion utilities."""
+
+from datetime import datetime, timedelta
+from typing import Literal
+
 import MetaTrader5 as mt5
+import pandas as pd
 import polars as pl
-from datetime import timedelta, datetime
 
 from alpha_research.data.market.constants import str_tf_to_mt5_tf
 
+__all__ = ['fetch_mt_data_prices']
 
-def ensure_datetime(value: str | datetime) -> datetime:
+
+def _ensure_datetime(value: str | datetime) -> datetime:
     """
-    Convert date strings into datetime objects.
+    Convert a supported date value to a ``datetime`` object.
+
+    Parameters
+    ----------
+    value : str or datetime
+        Date in ``YYYY-MM-DD`` format or an existing ``datetime`` object.
+
+    Returns
+    -------
+    datetime
+        Normalized date value.
     """
     if isinstance(value, str):
         return datetime.strptime(value, "%Y-%m-%d")
@@ -19,17 +36,48 @@ def fetch_mt_data_prices(
         timeframe: str,
         start_date: str | datetime,
         end_date: str | datetime,
-        days_before:int = 0):
+        days_before: int = 0,
+        backend: Literal['pandas', 'polars'] = 'polars',
+) -> pd.DataFrame | pl.DataFrame:
     """
-    Fetch OHLCV price data from MetaTrader 5 (MT5) and return a Polars DataFrame.
+    Fetch OHLCV price data from MetaTrader 5 (MT5).
 
-    :param symbol: Symbol from which the data will be imported
-    :param timeframe: Timeframe from which the data will be imported
-    :param start_date: Start date of the dataset in "YYYY-MM-DD" format
-    :param end_date: End date of the dataset in "YYYY-MM-DD" format
-    :param days_before: Days before the start_date to import to compute indicators values before
-    :return: df[time, open, high, low, close, volume, spread, spread_pts]
+    Data is fetched in chunks to avoid MT5's range-size limits. Chunk results
+    are deduplicated by timestamp and returned in chronological order.
+
+    Parameters
+    ----------
+    symbol : str
+        Symbol from which data is imported.
+    timeframe : str
+        MT5 timeframe name, such as ``'H1'`` or ``'D1'``.
+    start_date, end_date : str or datetime
+        Inclusive start and exclusive end of the requested range. Strings
+        must use the ``YYYY-MM-DD`` format.
+    days_before : int, default 0
+        Number of days to prepend to ``start_date``. This is useful for
+        computing indicators that need a warm-up period.
+    backend : {'pandas', 'polars'}, default 'polars'
+        DataFrame backend for the returned data. The default preserves the
+        original Polars return type.
+
+    Returns
+    -------
+    pd.DataFrame or pl.DataFrame
+        Data with columns ``time``, ``open``, ``high``, ``low``, ``close``,
+        ``volume``, ``spread``, and ``spread_pts``.
+
+    Raises
+    ------
+    ValueError
+        If ``backend`` is not ``'pandas'`` or ``'polars'``.
+    RuntimeError
+        If MT5 cannot be initialized, the symbol does not exist, or no data
+        is retrieved.
     """
+
+    if backend not in ('pandas', 'polars'):
+        raise ValueError("backend must be either 'pandas' or 'polars'.")
 
     # Initialize MT5 app
     if not mt5.initialize():
@@ -43,8 +91,8 @@ def fetch_mt_data_prices(
         timeframe = str_tf_to_mt5_tf[timeframe]
 
     # Convert date strings into datetime objects
-    start_date = ensure_datetime(start_date)
-    end_date = ensure_datetime(end_date)
+    start_date = _ensure_datetime(start_date)
+    end_date = _ensure_datetime(end_date)
 
     # Rolls back start_date. Ensures rolling indicators are fully defined at the true start date
     start_date = start_date - timedelta(days=days_before)
@@ -147,5 +195,8 @@ def fetch_mt_data_prices(
     # 5. Close MT5 session and logging
     # ------------------------------------------------------------------
     mt5.shutdown()
+
+    if backend == 'pandas':
+        return df.to_pandas()
 
     return df

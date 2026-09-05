@@ -606,6 +606,93 @@ def test_fdr_applied_per_group(multi_group_table):
     assert momentum['fdr_corrected_p_value'].values == pytest.approx(
         reversal['fdr_corrected_p_value'].values, abs=1e-8)
 
+
+def test_fdr_accepts_custom_column_names(single_group_table):
+    """Should use the configured p-value and feature-group columns."""
+    custom_table = single_group_table.rename(
+        columns={'p_value': 'probability', 'feature_group': 'family'}
+    )
+
+    result = fdr_correction(
+        custom_table,
+        p_value_column='probability',
+        feature_group_column='family',
+    )
+    expected = fdr_correction(single_group_table)
+
+    pd.testing.assert_series_equal(
+        result['fdr_rejected'], expected['fdr_rejected'], check_names=False
+    )
+    pd.testing.assert_series_equal(
+        result['fdr_corrected_p_value'],
+        expected['fdr_corrected_p_value'],
+        check_names=False,
+    )
+    assert 'probability' in result.columns
+    assert 'family' in result.columns
+
+
+def test_fdr_accepts_custom_column_names_for_polars(single_group_table):
+    """Should support custom column names for Polars input as well."""
+    custom_table = pl.from_pandas(
+        single_group_table.rename(
+            columns={'p_value': 'probability', 'feature_group': 'family'}
+        )
+    )
+
+    result = fdr_correction(
+        custom_table,
+        p_value_column='probability',
+        feature_group_column='family',
+    )
+    expected = fdr_correction(
+        custom_table.to_pandas(),
+        p_value_column='probability',
+        feature_group_column='family',
+    )
+
+    assert isinstance(result, pl.DataFrame)
+    pd.testing.assert_frame_equal(
+        result.to_pandas().reset_index(drop=True),
+        expected.reset_index(drop=True),
+        check_dtype=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ('alias', 'method'),
+    [(benjamini_hochberg, 'bh'), (benjamini_yekutieli, 'by')],
+)
+def test_fdr_aliases_accept_custom_column_names(single_group_table, alias, method):
+    """BH and BY aliases should forward custom column names."""
+    custom_table = single_group_table.rename(
+        columns={'p_value': 'probability', 'feature_group': 'family'}
+    )
+
+    result = alias(
+        custom_table,
+        p_value_column='probability',
+        feature_group_column='family',
+    )
+    expected = fdr_correction(
+        custom_table,
+        method=method,
+        p_value_column='probability',
+        feature_group_column='family',
+    )
+
+    pd.testing.assert_frame_equal(result, expected)
+
+
+def test_fdr_custom_column_names_are_validated(single_group_table):
+    """Should raise KeyError when a configured column is missing."""
+    with pytest.raises(KeyError):
+        fdr_correction(
+            single_group_table,
+            p_value_column='probability',
+            feature_group_column='family',
+        )
+
 # raises
 def test_fdr_missing_column_raises(single_group_table):
     """Should raise KeyError if required columns are missing."""
