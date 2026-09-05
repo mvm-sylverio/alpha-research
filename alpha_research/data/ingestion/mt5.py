@@ -9,8 +9,10 @@ import polars as pl
 
 from alpha_research.data.market.constants import str_tf_to_mt5_tf
 
+__all__ = ['fetch_mt_data_prices']
 
-def ensure_datetime(value: str | datetime) -> datetime:
+
+def _ensure_datetime(value: str | datetime) -> datetime:
     """
     Convert a supported date value to a ``datetime`` object.
 
@@ -89,8 +91,8 @@ def fetch_mt_data_prices(
         timeframe = str_tf_to_mt5_tf[timeframe]
 
     # Convert date strings into datetime objects
-    start_date = ensure_datetime(start_date)
-    end_date = ensure_datetime(end_date)
+    start_date = _ensure_datetime(start_date)
+    end_date = _ensure_datetime(end_date)
 
     # Rolls back start_date. Ensures rolling indicators are fully defined at the true start date
     start_date = start_date - timedelta(days=days_before)
