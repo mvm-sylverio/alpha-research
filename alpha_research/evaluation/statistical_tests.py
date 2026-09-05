@@ -363,7 +363,9 @@ def stationarity_test(
 def _fdr_correction_pandas(
         df: pd.DataFrame,
         fdr: float = 0.05,
-        method: Literal['bh', 'by'] = 'bh'
+        method: Literal['bh', 'by'] = 'bh',
+        p_value_column: str = 'p_value',
+        feature_group_column: str = 'feature_group',
 ) -> pd.DataFrame:
     """
     Core pandas implementation of fdr_correction.
@@ -375,13 +377,13 @@ def _fdr_correction_pandas(
     df['fdr_rejected'] = False
     df['fdr_corrected_p_value'] = np.nan
 
-    # get all group names in df['feature_group']
-    groups = np.unique(df['feature_group'].to_numpy())
+    # get all group names in df[feature_group_column]
+    groups = np.unique(df[feature_group_column].to_numpy())
 
     for group in groups:
-        group_mask = df['feature_group'] == group
+        group_mask = df[feature_group_column] == group
 
-        p_values = np.asarray(df.loc[group_mask, 'p_value'], dtype=float)
+        p_values = np.asarray(df.loc[group_mask, p_value_column], dtype=float)
 
         valid_mask = np.isfinite(p_values)
 
@@ -401,10 +403,13 @@ def _fdr_correction_pandas(
 
     return df
 
+
 def fdr_correction(
         df: pd.DataFrame | pl.DataFrame,
         fdr: float = 0.05,
-        method: Literal['bh', 'by'] = 'bh'
+        method: Literal['bh', 'by'] = 'bh',
+        p_value_column: str = 'p_value',
+        feature_group_column: str = 'feature_group',
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Apply the FDR correction (Benjamini-Hochberg - BH or Benjamini-Yekutieli - BY)
@@ -439,6 +444,10 @@ def fdr_correction(
         correlated tries.
         by = Benjamini-Yekutieli correction - for arbitrary dependence, including
         negative correlation. More conservative than BH.
+    p_value_column : str
+        String name of the p_value column in df (default = 'p_value').
+    feature_group_column : str
+        String name of the feature_group column in df (default = 'feature_group').
 
     Returns
     -------
@@ -450,7 +459,7 @@ def fdr_correction(
     Raises
     ------
     KeyError
-        If p_value, feature_group are not columns of the df.
+        If p_value_column or feature_group_column is not a column of df.
     TypeError
         If df is not pandas or polars type.
 
@@ -459,16 +468,18 @@ def fdr_correction(
     Summary tables should not have different run performance in polars
     and pandas. Therefore, everything is transformed to pandas for code simplicity.
     """
-    _validate_df(df, ['p_value', 'feature_group'])
+    _validate_df(df, [p_value_column, feature_group_column])
 
     if isinstance(df, pd.DataFrame):
-        return _fdr_correction_pandas(df, fdr, method)
+        return _fdr_correction_pandas(df, fdr, method, p_value_column, feature_group_column)
     else:  # pl.Dataframe type
-        return pl.from_pandas(_fdr_correction_pandas(df.to_pandas(), fdr, method))
+        return pl.from_pandas(_fdr_correction_pandas(df.to_pandas(), fdr, method, p_value_column, feature_group_column))
 
 def benjamini_hochberg(
         df: pd.DataFrame | pl.DataFrame,
         fdr: float = 0.05,
+        p_value_column: str = 'p_value',
+        feature_group_column: str = 'feature_group',
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Apply Benjamini-Hochberg FDR correction per feature group.
@@ -480,11 +491,13 @@ def benjamini_hochberg(
 
     See fdr_correction() for full documentation.
     """
-    return fdr_correction(df, fdr, 'bh')
+    return fdr_correction(df, fdr, 'bh', p_value_column, feature_group_column)
 
 def benjamini_yekutieli(
         df: pd.DataFrame | pl.DataFrame,
         fdr: float = 0.05,
+        p_value_column: str = 'p_value',
+        feature_group_column: str = 'feature_group',
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Apply Benjamini-Yekutieli FDR correction per feature group.
@@ -496,4 +509,4 @@ def benjamini_yekutieli(
 
     See fdr_correction() for full documentation.
     """
-    return fdr_correction(df, fdr, 'by')
+    return fdr_correction(df, fdr, 'by', p_value_column, feature_group_column)
