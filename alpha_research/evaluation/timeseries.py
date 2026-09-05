@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import pandas as pd
@@ -10,8 +10,19 @@ from alpha_research._utils import (
     _validate_df,
     _validate_time_order,
 )
-from alpha_research.evaluation.ic import information_coefficient
-from alpha_research.evaluation.statistical_tests import wald_temporal_association_test
+from alpha_research.evaluation.ic import (
+    TargetFn,
+    _generate_target_frames,
+    information_coefficient,
+)
+from alpha_research.evaluation.statistical_tests import (
+    fdr_correction,
+    wald_temporal_association_test,
+)
+from alpha_research.features.schema import (
+    get_feature_name,
+    join_feature_target_frames,
+)
 from alpha_research.resampling.block_bootstrap import (
     bootstrap_metrics,
     generate_moving_blocks,
@@ -22,6 +33,12 @@ from alpha_research.resampling.block_bootstrap import (
 __all__ = [
     'temporal_association',
     'temporal_association_summary_table',
+    'TemporalAssociationDecayResult',
+    'temporal_association_decay',
+    'TemporalAssociationDecaySummaryResult',
+    'temporal_association_decay_summary',
+    'TemporalAssociationDecaySummaryTableResult',
+    'temporal_association_decay_summary_table',
     'RollingTemporalAssociationResult',
     'rolling_temporal_association',
     'summarize_rolling_temporal_association',
@@ -414,6 +431,7 @@ def rolling_temporal_association(
         random_state: int | None = None,
         time_col: str = 'time',
         symbol_col: str = 'symbol',
+        progress_callback: Callable[[], None] | None = None,
 ) -> RollingTemporalAssociationResult:
     """
     Compute bootstrap temporal-association diagnostics in rolling time windows.
@@ -461,6 +479,9 @@ def rolling_temporal_association(
         the end of each window.
     symbol_col : str, default 'symbol'
         Single-asset identifier column.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
+
 
     Returns
     -------
@@ -566,6 +587,8 @@ def rolling_temporal_association(
 
         if len(valid_pairs) != window_size:
             rows.append(row)
+            if progress_callback is not None:
+                progress_callback()
             continue
 
         observed_association = information_coefficient(
@@ -578,6 +601,8 @@ def rolling_temporal_association(
         if not np.isfinite(observed_association):
             row['status'] = 'undefined_association'
             rows.append(row)
+            if progress_callback is not None:
+                progress_callback()
             continue
 
         blocks = generate_moving_blocks(
@@ -608,6 +633,8 @@ def rolling_temporal_association(
         except ValueError:
             row['status'] = 'undefined_bootstrap'
             rows.append(row)
+            if progress_callback is not None:
+                progress_callback()
             continue
 
         row.update({
@@ -618,6 +645,8 @@ def rolling_temporal_association(
             'status': 'ok',
         })
         rows.append(row)
+        if progress_callback is not None:
+            progress_callback()
 
     rolling_pandas = pd.DataFrame(rows)
     if isinstance(df, pd.DataFrame):
@@ -644,6 +673,7 @@ def temporal_association_summary_table(
         time_col: str = 'time',
         symbol_col: str = 'symbol',
         feature_groups: dict[str, str] | None = None,
+        progress_callback: Callable[[], None] | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize bootstrap temporal-association diagnostics for one or more features.
@@ -778,8 +808,585 @@ def temporal_association_summary_table(
             'n_bootstraps': metrics.n_bootstraps,
             'feature_group': feature_group,
         })
+        if progress_callback is not None:
+            progress_callback()
 
     if isinstance(df, pd.DataFrame):
         return pd.DataFrame(rows)
 
     return pl.DataFrame(rows)
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalAssociationDecayResult:
+    """
+    Result of a temporal-association decay computation.
+
+    Attributes
+    ----------
+    table : pd.DataFrame | pl.DataFrame
+        One row per target horizon. It contains the observed temporal
+        association, Moving Block Bootstrap metrics, Wald-test results, and
+        FDR-corrected significance for the evaluated feature.
+    """
+    table: pd.DataFrame | pl.DataFrame
+
+
+def temporal_association_decay(
+        df_feature: pd.DataFrame | pl.DataFrame,
+        feature: str,
+        target_data: pd.DataFrame | pl.DataFrame,
+        horizons: list[int],
+        target_fn: TargetFn,
+        block_length: int,
+        n_bootstraps: int,
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        step: int = 1,
+        confidence_level: float = 0.95,
+        random_state: int | None = None,
+        time_col: str = 'time',
+        symbol_col: str = 'symbol',
+        feature_groups: dict[str, str] | None = None,
+        fdr: float = 0.05,
+        fdr_method: Literal['bh', 'by'] = 'bh',
+        progress_callback: Callable[[], None] | None = None,
+) -> TemporalAssociationDecayResult:
+    """
+    Compute the temporal-association decay curve of one feature.
+
+    The feature is held fixed while target_fn generates one aligned forward
+    target for every requested horizon. At each horizon, the function
+    estimates the single-asset temporal association, obtains uncertainty with
+    Moving Block Bootstrap (MBB), and applies a Wald test. FDR correction is
+    then applied jointly across the horizons of the feature.
+
+    Parameters
+    ----------
+    df_feature : pd.DataFrame | pl.DataFrame
+        Wide single-asset DataFrame containing time_col, symbol_col, and
+        feature. Times must be unique and strictly increasing.
+    feature : str
+        Feature column in df_feature to evaluate.
+    target_data : pd.DataFrame | pl.DataFrame
+        DataFrame supplied to target_fn to generate each horizon-specific
+        target. It must use the same backend as df_feature.
+    horizons : list[int]
+        Unique positive forward horizons to evaluate.
+    target_fn : Callable[[pd.DataFrame | pl.DataFrame, int], pd.DataFrame | pl.DataFrame]
+        Function called as ``target_fn(target_data, horizon=horizon)``. Each
+        returned frame must contain time_col, symbol_col, and exactly one
+        target value column. Fixed target configuration may be supplied with
+        functools.partial as long as target_data and horizon remain accepted.
+    block_length : int
+        Candidate MBB block size, in observations.
+    n_bootstraps : int
+        Number of MBB samples for each feature-horizon estimate.
+    corr_method : {'pearson', 'spearman'}, default 'spearman'
+        Correlation estimator for observed and bootstrap associations.
+    step : int, default 1
+        Candidate-block start increment passed to MBB.
+    confidence_level : float, default 0.95
+        Confidence level used in bootstrap metrics and Wald intervals.
+    random_state : int | None, default None
+        Root seed for MBB. When supplied, deterministic distinct child seeds
+        are used for horizons so they do not reuse an identical block-draw
+        sequence.
+    time_col : str, default 'time'
+        Temporal key column.
+    symbol_col : str, default 'symbol'
+        Single-asset identifier column.
+    feature_groups : dict[str, str] | None, default None
+        Optional semantic group mapping. It is metadata; the FDR family is
+        always the horizons of this one feature.
+    fdr : float, default 0.05
+        False discovery rate for the horizon family.
+    fdr_method : {'bh', 'by'}, default 'bh'
+        Multiple-testing correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
+
+    Returns
+    -------
+    TemporalAssociationDecayResult
+        Detailed temporal-association results ordered by ascending horizon.
+
+    Raises
+    ------
+    ValueError
+        If the single-asset temporal contract, feature or target frame,
+        horizons, MBB configuration, Wald test, or FDR configuration is
+        invalid.
+    KeyError
+        If a required feature, key, or generated target column is absent.
+    TypeError
+        If DataFrame backends differ or target_fn returns an unsupported
+        DataFrame type.
+
+    Notes
+    -----
+    This is a full-sample horizon-persistence analysis. It is distinct from a
+    rolling temporal-association diagnostic and does not construct windows.
+    """
+    _validate_df(df_feature, [time_col, symbol_col, feature])
+    _validate_single_symbol(df_feature, symbol_col)
+    _validate_time_order(df_feature, time_col)
+
+    target_frames = _generate_target_frames(
+        df_feature=df_feature,
+        target_data=target_data,
+        horizons=horizons,
+        target_fn=target_fn,
+    )
+    return _temporal_association_decay_from_target_frames(
+        df_feature=df_feature,
+        feature=feature,
+        target_frames=target_frames,
+        block_length=block_length,
+        n_bootstraps=n_bootstraps,
+        corr_method=corr_method,
+        step=step,
+        confidence_level=confidence_level,
+        random_state=random_state,
+        time_col=time_col,
+        symbol_col=symbol_col,
+        feature_groups=feature_groups,
+        fdr=fdr,
+        fdr_method=fdr_method,
+        progress_callback=progress_callback,
+    )
+
+
+def _temporal_association_decay_from_target_frames(
+        df_feature: pd.DataFrame | pl.DataFrame,
+        feature: str,
+        target_frames: dict[int, pd.DataFrame | pl.DataFrame],
+        block_length: int,
+        n_bootstraps: int,
+        corr_method: Literal['pearson', 'spearman'],
+        step: int,
+        confidence_level: float,
+        random_state: int | None,
+        time_col: str,
+        symbol_col: str,
+        feature_groups: dict[str, str] | None,
+        fdr: float,
+        fdr_method: Literal['bh', 'by'],
+        progress_callback: Callable[[], None] | None = None,
+) -> TemporalAssociationDecayResult:
+    """
+    Compute one feature's temporal-association decay from generated targets.
+
+    Parameters
+    ----------
+    df_feature : pd.DataFrame | pl.DataFrame
+        Validated single-asset feature DataFrame.
+    feature : str
+        Feature column to evaluate.
+    target_frames : dict[int, pd.DataFrame | pl.DataFrame]
+        Generated target frames indexed by horizon. Each frame must contain
+        time_col, symbol_col, and exactly one target value column.
+    block_length : int
+        Candidate MBB block size.
+    n_bootstraps : int
+        Number of MBB samples per horizon.
+    corr_method : {'pearson', 'spearman'}
+        Association estimator for observed and bootstrap estimates.
+    step : int
+        Candidate-block start increment passed to MBB.
+    confidence_level : float
+        Confidence level for bootstrap and Wald metrics.
+    random_state : int | None
+        Root seed used to derive one child seed per horizon.
+    time_col : str
+        Temporal key column.
+    symbol_col : str
+        Single-asset identifier column.
+    feature_groups : dict[str, str] | None
+        Optional feature-group mapping.
+    fdr : float
+        False discovery rate across horizons.
+    fdr_method : {'bh', 'by'}
+        FDR correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
+
+    Returns
+    -------
+    TemporalAssociationDecayResult
+        Horizon-level MBB, Wald, and FDR results sorted by horizon.
+
+    Raises
+    ------
+    ValueError
+        If a generated target or a downstream temporal-association calculation
+        does not meet its required contract.
+    TypeError
+        If feature and target frames use different DataFrame backends.
+
+    Notes
+    -----
+    This helper does not invoke target_fn. It is shared by the single-feature
+    and multi-feature public functions so one generated target frame can be
+    reused for every feature.
+    """
+    feature_group = (
+        feature_groups.get(feature, 'ungrouped')
+        if feature_groups is not None
+        else 'ungrouped'
+    )
+    child_random_states = _rolling_random_states(
+        n_windows=len(target_frames),
+        random_state=random_state,
+    )
+    rows = []
+
+    for (horizon, target_df), child_random_state in zip(
+            target_frames.items(),
+            child_random_states,
+    ):
+        target_col = get_feature_name(target_df, time_col, symbol_col)
+        joined_df = join_feature_target_frames(
+            feature_df=df_feature,
+            target_df=target_df,
+            feature_col=feature,
+            target_col=target_col,
+            time_col=time_col,
+            symbol_col=symbol_col,
+        )
+        if isinstance(joined_df, pd.DataFrame):
+            joined_df = joined_df.sort_values(time_col).reset_index(drop=True)
+        else:
+            joined_df = joined_df.sort(time_col)
+
+        horizon_table = temporal_association_summary_table(
+            df=joined_df,
+            feature_list=[feature],
+            target=target_col,
+            block_length=block_length,
+            n_bootstraps=n_bootstraps,
+            corr_method=corr_method,
+            step=step,
+            confidence_level=confidence_level,
+            random_state=child_random_state,
+            time_col=time_col,
+            symbol_col=symbol_col,
+            feature_groups={feature: feature_group},
+        )
+        if isinstance(horizon_table, pd.DataFrame):
+            row = horizon_table.iloc[0].to_dict()
+        else:
+            row = horizon_table.row(0, named=True)
+
+        rows.append({
+            **row,
+            'target': target_col,
+            'horizon': horizon,
+        })
+        if progress_callback is not None:
+            progress_callback()
+
+    if isinstance(df_feature, pd.DataFrame):
+        result_table = pd.DataFrame(rows)
+    else:
+        result_table = pl.DataFrame(rows)
+
+    result_table = fdr_correction(
+        result_table,
+        fdr=fdr,
+        method=fdr_method,
+    )
+    if isinstance(result_table, pd.DataFrame):
+        result_table = result_table.sort_values('horizon').reset_index(drop=True)
+    else:
+        result_table = result_table.sort('horizon')
+
+    return TemporalAssociationDecayResult(table=result_table)
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalAssociationDecaySummaryResult:
+    """
+    Scalar summary of a temporal-association decay curve.
+
+    Attributes
+    ----------
+    peak_horizon : int
+        Horizon with the largest absolute temporal association.
+    peak_abs_association : float
+        Absolute temporal association at peak_horizon.
+    halflife_horizon : int | None
+        First horizon at or after peak_horizon where absolute association is at
+        most half of its peak magnitude.
+    last_significant_horizon : int | None
+        Largest horizon passing FDR correction.
+    auc : float
+        Trapezoidal area under absolute association versus horizon.
+    """
+    peak_horizon: int
+    peak_abs_association: float
+    halflife_horizon: int | None
+    last_significant_horizon: int | None
+    auc: float
+
+
+def temporal_association_decay_summary(
+        decay_curve: pd.DataFrame | pl.DataFrame,
+) -> TemporalAssociationDecaySummaryResult:
+    """
+    Summarize a temporal-association decay curve into scalar diagnostics.
+
+    Parameters
+    ----------
+    decay_curve : pd.DataFrame | pl.DataFrame
+        Table returned by temporal_association_decay().table. It must contain
+        horizon, association, and fdr_rejected columns.
+
+    Returns
+    -------
+    TemporalAssociationDecaySummaryResult
+        Peak magnitude, discrete half-life, FDR persistence, and area under
+        the absolute association curve.
+
+    Raises
+    ------
+    ValueError
+        If decay_curve is empty, has duplicate horizons, or has no finite
+        association values.
+    KeyError
+        If a required decay-curve column is absent.
+    TypeError
+        If decay_curve is not a Pandas or Polars DataFrame.
+
+    Notes
+    -----
+    Half-life is a discrete grid diagnostic without interpolation. A zero peak
+    has no half-life because a relative 50% threshold is not informative.
+    AUC comparisons are meaningful only on the same horizon grid.
+    """
+    _validate_df(decay_curve, ['horizon', 'association', 'fdr_rejected'])
+
+    if isinstance(decay_curve, pd.DataFrame):
+        curve = decay_curve.sort_values('horizon')
+        horizons = curve['horizon'].to_numpy(dtype=int)
+        association = curve['association'].to_numpy(dtype=float)
+        rejected = curve['fdr_rejected'].to_numpy(dtype=bool)
+    else:
+        curve = decay_curve.sort('horizon')
+        horizons = curve['horizon'].to_numpy()
+        association = curve['association'].to_numpy()
+        rejected = curve['fdr_rejected'].to_numpy()
+
+    if len(horizons) == 0:
+        raise ValueError('decay_curve must not be empty.')
+
+    if len(np.unique(horizons)) != len(horizons):
+        raise ValueError('decay_curve must contain exactly one row per horizon.')
+
+    finite_mask = np.isfinite(association)
+    if not finite_mask.any():
+        raise ValueError('decay_curve contains no finite association values.')
+
+    valid_horizons = horizons[finite_mask]
+    valid_abs_association = np.abs(association[finite_mask])
+    peak_idx = int(np.argmax(valid_abs_association))
+    peak_horizon = int(valid_horizons[peak_idx])
+    peak_abs_association = float(valid_abs_association[peak_idx])
+
+    halflife_horizon = None
+    if not np.isclose(peak_abs_association, 0.0, atol=1e-12):
+        post_peak_mask = valid_horizons >= peak_horizon
+        half_mask = (
+            valid_abs_association[post_peak_mask]
+            <= peak_abs_association / 2
+        )
+        if half_mask.any():
+            halflife_horizon = int(
+                valid_horizons[post_peak_mask][np.flatnonzero(half_mask)[0]]
+            )
+
+    significant_horizons = horizons[rejected]
+    last_significant_horizon = (
+        int(np.max(significant_horizons))
+        if len(significant_horizons)
+        else None
+    )
+    auc = (
+        float(np.trapezoid(y=valid_abs_association, x=valid_horizons))
+        if len(valid_horizons) >= 2
+        else 0.0
+    )
+
+    return TemporalAssociationDecaySummaryResult(
+        peak_horizon=peak_horizon,
+        peak_abs_association=peak_abs_association,
+        halflife_horizon=halflife_horizon,
+        last_significant_horizon=last_significant_horizon,
+        auc=auc,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TemporalAssociationDecaySummaryTableResult:
+    """
+    Result of a multi-feature temporal-association decay computation.
+
+    Attributes
+    ----------
+    table : pd.DataFrame | pl.DataFrame
+        One scalar decay summary row per requested feature.
+    decay_results : dict[str, TemporalAssociationDecayResult]
+        Complete horizon-level decay results indexed by feature name.
+    """
+    table: pd.DataFrame | pl.DataFrame
+    decay_results: dict[str, TemporalAssociationDecayResult]
+
+
+def temporal_association_decay_summary_table(
+        df_features: pd.DataFrame | pl.DataFrame,
+        feature_list: list[str],
+        target_data: pd.DataFrame | pl.DataFrame,
+        horizons: list[int],
+        target_fn: TargetFn,
+        block_length: int,
+        n_bootstraps: int,
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        step: int = 1,
+        confidence_level: float = 0.95,
+        random_state: int | None = None,
+        time_col: str = 'time',
+        symbol_col: str = 'symbol',
+        feature_groups: dict[str, str] | None = None,
+        fdr: float = 0.05,
+        fdr_method: Literal['bh', 'by'] = 'bh',
+        progress_callback: Callable[[], None] | None = None,
+) -> TemporalAssociationDecaySummaryTableResult:
+    """
+    Compute temporal-association decay diagnostics for multiple features.
+
+    The function generates each target once per requested horizon and reuses
+    those target frames across all features. Each feature receives its own MBB
+    estimates, Wald tests, and FDR correction across its horizon family.
+
+    Parameters
+    ----------
+    df_features : pd.DataFrame | pl.DataFrame
+        Wide single-asset DataFrame with time_col, symbol_col, and all columns
+        in feature_list. Times must be unique and strictly increasing.
+    feature_list : list[str]
+        Non-empty, non-duplicated feature columns to evaluate.
+    target_data : pd.DataFrame | pl.DataFrame
+        DataFrame supplied to target_fn for each horizon.
+    horizons : list[int]
+        Unique positive target horizons shared by all features.
+    target_fn : Callable[[pd.DataFrame | pl.DataFrame, int], pd.DataFrame | pl.DataFrame]
+        Function called as ``target_fn(target_data, horizon=horizon)``.
+    block_length : int
+        Candidate MBB block size, in observations.
+    n_bootstraps : int
+        Number of MBB samples per feature and horizon.
+    corr_method : {'pearson', 'spearman'}, default 'spearman'
+        Association estimator.
+    step : int, default 1
+        Candidate-block start increment for MBB.
+    confidence_level : float, default 0.95
+        Confidence level for bootstrap and Wald metrics.
+    random_state : int | None, default None
+        Root MBB seed. Child seeds vary by horizon deterministically.
+    time_col : str, default 'time'
+        Temporal key column.
+    symbol_col : str, default 'symbol'
+        Single-asset identifier column.
+    feature_groups : dict[str, str] | None, default None
+        Optional semantic groups for result metadata.
+    fdr : float, default 0.05
+        False discovery rate per feature across its horizons.
+    fdr_method : {'bh', 'by'}, default 'bh'
+        Multiple-testing correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after every completed feature-horizon
+        estimate.
+
+    Returns
+    -------
+    TemporalAssociationDecaySummaryTableResult
+        A summary table and complete detailed decay result for each feature.
+
+    Raises
+    ------
+    ValueError
+        If feature_list, horizons, temporal data, MBB configuration, or a
+        downstream statistic is invalid.
+    KeyError
+        If required feature, key, or target columns are absent.
+    TypeError
+        If DataFrame backends differ.
+
+    Notes
+    -----
+    This function does not perform rolling analysis. It evaluates one
+    full-sample association per feature-horizon pair.
+    """
+    if not feature_list:
+        raise ValueError('feature_list must not be empty.')
+
+    if len(set(feature_list)) != len(feature_list):
+        raise ValueError('feature_list must not contain duplicates.')
+
+    _validate_df(df_features, [time_col, symbol_col] + feature_list)
+    _validate_single_symbol(df_features, symbol_col)
+    _validate_time_order(df_features, time_col)
+
+    target_frames = _generate_target_frames(
+        df_feature=df_features,
+        target_data=target_data,
+        horizons=horizons,
+        target_fn=target_fn,
+    )
+
+    rows = []
+    decay_results = {}
+    for feature in feature_list:
+        decay_result = _temporal_association_decay_from_target_frames(
+            df_feature=df_features,
+            feature=feature,
+            target_frames=target_frames,
+            block_length=block_length,
+            n_bootstraps=n_bootstraps,
+            corr_method=corr_method,
+            step=step,
+            confidence_level=confidence_level,
+            random_state=random_state,
+            time_col=time_col,
+            symbol_col=symbol_col,
+            feature_groups=feature_groups,
+            fdr=fdr,
+            fdr_method=fdr_method,
+            progress_callback=progress_callback,
+        )
+        decay_table = decay_result.table
+        if isinstance(decay_table, pd.DataFrame):
+            feature_group = decay_table['feature_group'].iloc[0]
+        else:
+            feature_group = decay_table['feature_group'][0]
+
+        summary = temporal_association_decay_summary(decay_table)
+        decay_results[feature] = decay_result
+        rows.append({
+            'feature': feature,
+            'peak_horizon': summary.peak_horizon,
+            'peak_abs_association': summary.peak_abs_association,
+            'halflife_horizon': summary.halflife_horizon,
+            'last_significant_horizon': summary.last_significant_horizon,
+            'auc': summary.auc,
+            'feature_group': feature_group,
+        })
+
+    if isinstance(df_features, pd.DataFrame):
+        table = pd.DataFrame(rows)
+    else:
+        table = pl.DataFrame(rows)
+
+    return TemporalAssociationDecaySummaryTableResult(
+        table=table,
+        decay_results=decay_results,
+    )

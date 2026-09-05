@@ -424,6 +424,7 @@ def ic_decay(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        progress_callback: Callable[[], None] | None = None,
 ) -> ICDecayResult:
     """
     Compute the Information Coefficient decay curve of one feature.
@@ -469,6 +470,8 @@ def ic_decay(
         False discovery rate.
     fdr_method : {'bh', 'by'}
         Multiple-testing correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
 
     Returns
     -------
@@ -507,6 +510,7 @@ def ic_decay(
         feature_groups=feature_groups,
         fdr=fdr,
         fdr_method=fdr_method,
+        progress_callback=progress_callback,
     )
 
 
@@ -584,6 +588,7 @@ def _ic_decay_from_target_frames(
         feature_groups: dict[str, str] | None,
         fdr: float,
         fdr_method: Literal['bh', 'by'],
+        progress_callback: Callable[[], None] | None = None,
 ) -> ICDecayResult:
     """
     Compute one feature's IC decay from pre-generated target DataFrames.
@@ -610,6 +615,8 @@ def _ic_decay_from_target_frames(
         False discovery rate.
     fdr_method : {'bh', 'by'}
         Multiple-testing correction method.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after each completed horizon estimate.
 
     Returns
     -------
@@ -688,6 +695,8 @@ def _ic_decay_from_target_frames(
 
             'n_obs': len(ic_series),
         })
+        if progress_callback is not None:
+            progress_callback()
 
     if isinstance(df_feature, pd.DataFrame):
         result_table = pd.DataFrame(rows)
@@ -912,6 +921,7 @@ def ic_decay_summary_table(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        progress_callback: Callable[[], None] | None = None,
 ) -> ICDecaySummaryTableResult:
     """
     Compute IC decay diagnostics for multiple columns in a wide DataFrame.
@@ -951,6 +961,9 @@ def ic_decay_summary_table(
     fdr_method : {'bh', 'by'}
         Multiple-testing correction applied independently to the horizons
         of each feature.
+    progress_callback : Callable[[], None] | None, default None
+        Optional callback invoked after every completed feature-horizon
+        estimate.
 
     Returns
     -------
@@ -999,6 +1012,7 @@ def ic_decay_summary_table(
             feature_groups=feature_groups,
             fdr=fdr,
             fdr_method=fdr_method,
+            progress_callback=progress_callback,
         )
 
         decay_table = decay_result.table
@@ -1037,8 +1051,3 @@ def ic_decay_summary_table(
         table=table,
         decay_results=decay_results,
     )
-
-
-# --------------------------
-# Plots
-# --------------------------
