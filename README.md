@@ -11,9 +11,9 @@ input DataFrame backend whenever practical.
 
 ## What it provides
 
-- Feature and target utilities: simple/log returns, forward returns, trend
-  features, volatility measures including realized volatility and ATR, ADX,
-  and cross-sectional ranking.
+- Feature and target utilities: simple/log returns, forward returns, OHLC
+  Triple-Barrier labels, trend features, volatility measures including realized
+  volatility and ATR, ADX, and cross-sectional ranking.
 - Research data utilities: feature/target schema helpers and purged
   train/test splitting.
 - Cross-sectional information coefficient analysis with Pearson or Spearman
@@ -53,6 +53,7 @@ correction to the resulting feature family.
 ```python
 from alpha_research.evaluation.ic import ic_summary_table
 from alpha_research.evaluation.statistical_tests import fdr_correction
+from alpha_research.features.schema import join_feature_target_frames
 from alpha_research.features.targets import fwd_returns
 from alpha_research.features.trend import price_to_sma_ratio
 
@@ -60,10 +61,13 @@ from alpha_research.features.trend import price_to_sma_ratio
 feature_frame = price_to_sma_ratio(ohlcv, window=20)
 target_frame = fwd_returns(ohlcv, horizon=10)
 
-research_frame = (
-    feature_frame
-    .merge(target_frame, on=['time', 'symbol'])
-    .dropna()
+research_frame = join_feature_target_frames(
+    feature_df=feature_frame,
+    target_df=target_frame,
+    feature_col='price_to_sma_ratio_20',
+    target_col='fwd_ret_10',
+    time_col='time',
+    symbol_col='symbol',
 )
 
 ic_result = ic_summary_table(
