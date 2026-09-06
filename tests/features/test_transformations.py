@@ -3,12 +3,13 @@ import pandas as pd
 import polars as pl
 import numpy as np
 
-from alpha_research.features.transformations import cross_sectional_rank
 from alpha_research.features.transformations import (
     _normalize_feature_cols,
     _validate_temporal_order_by_symbol,
     cross_sectional_rank,
+    cross_sectional_zscore,
     rolling_rank,
+    rolling_zscore,
 )
 
 # ------------------------------------------------------
@@ -179,6 +180,41 @@ def test_validate_temporal_order_by_symbol_rejects_invalid_times(time_values, er
 
 
 # ------------------------------------------------------
+# cross_sectional_zscore
+# ------------------------------------------------------
+def test_cross_sectional_zscore_calculates_population_standardization(
+        multi_asset_features_pandas,
+):
+    """Should standardize each two-asset date to z-scores of minus and plus one."""
+    result = cross_sectional_zscore(multi_asset_features_pandas, 'simple_ret_1')
+
+    assert 'simple_ret_1_cs_zscore' in result.columns
+    np.testing.assert_allclose(
+        result['simple_ret_1_cs_zscore'].to_numpy(),
+        [1.0, -1.0, -1.0, 1.0, 1.0, -1.0],
+    )
+
+
+def test_cross_sectional_zscore_returns_missing_for_constant_cross_section():
+    """Should not assign an arbitrary z-score to a zero-dispersion date."""
+    df = pd.DataFrame({
+        'time': ['2024-01-01', '2024-01-01'],
+        'symbol': ['AAPL', 'MSFT'],
+        'feature': [2.0, 2.0],
+    })
+    result = cross_sectional_zscore(df, 'feature')
+    assert result['feature_cs_zscore'].isna().all()
+
+
+def test_cross_sectional_zscore_rejects_missing_feature_column(
+        multi_asset_features_pandas,
+):
+    """Should retain the shared required-column validation contract."""
+    with pytest.raises(KeyError, match='missing required columns'):
+        cross_sectional_zscore(multi_asset_features_pandas, 'missing_feature')
+
+
+# ------------------------------------------------------
 # rolling_rank
 # ------------------------------------------------------
 def test_rolling_rank_calculates_each_asset_independently(
@@ -192,3 +228,34 @@ def test_rolling_rank_calculates_each_asset_independently(
         [np.nan, np.nan, 3.0, 3.0, np.nan, np.nan, 1.0, 1.0],
         equal_nan=True,
     )
+
+
+# ------------------------------------------------------
+# rolling_zscore
+# ------------------------------------------------------
+def test_rolling_zscore_calculates_causal_population_standardization(
+        temporal_multi_asset_features_pandas,
+):
+    """Should include the current observation and use only its trailing window."""
+    result = rolling_zscore(temporal_multi_asset_features_pandas, 'momentum', window=3)
+    expected_extreme = 1.224744871391589
+
+    np.testing.assert_allclose(
+        result['momentum_rolling_zscore_3'].to_numpy(),
+        [
+            np.nan, np.nan, expected_extreme, expected_extreme,
+            np.nan, np.nan, -expected_extreme, -expected_extreme,
+        ],
+        equal_nan=True,
+    )
+
+
+def test_rolling_zscore_returns_missing_for_constant_window():
+    """Should leave the z-score undefined when a full rolling window is constant."""
+    df = pd.DataFrame({
+        'time': ['2024-01-01', '2024-01-02', '2024-01-03'],
+        'symbol': ['AAPL'] * 3,
+        'feature': [2.0, 2.0, 2.0],
+    })
+    result = rolling_zscore(df, 'feature', window=3)
+    assert result['feature_rolling_zscore_3'].isna().all()

@@ -179,6 +179,74 @@ def cross_sectional_rank(
             for feature in feature_cols
         ])
 
+
+def cross_sectional_zscore(
+        df: pd.DataFrame | pl.DataFrame,
+        feature_cols: str | list[str],
+        symbol_col: str = 'symbol',
+        time_col: str = 'time',
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Standardize feature values across assets independently at every time based on z-score.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Wide DataFrame with time_col, symbol_col, and the requested features.
+    feature_cols : str | list[str]
+        Feature columns standardized within every cross-section.
+    symbol_col : str, default 'symbol'
+        Asset identifier column required by the feature-frame contract.
+    time_col : str, default 'time'
+        Time column defining each cross-section.
+
+    Returns
+    -------
+    pd.DataFrame | pl.DataFrame
+        Input columns plus ``{feature}_cs_zscore`` columns. Each valid
+        cross-section uses its population standard deviation (``ddof=0``).
+
+    Raises
+    ------
+    KeyError
+        If a required column is absent.
+    TypeError
+        If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
+    ValueError
+        If df is empty, a required column is entirely missing, or feature_cols
+        is an empty list.
+
+    Notes
+    -----
+    Cross-sections with fewer than two valid values or zero dispersion produce
+    missing transformed values because their z-score is undefined.
+    """
+    feature_cols = _normalize_feature_cols(feature_cols)
+    _validate_df(df, [symbol_col, time_col] + feature_cols)
+
+    if isinstance(df, pd.DataFrame):
+        result = df.copy()
+        for feature in feature_cols:
+            grouped = result.groupby(time_col)[feature]
+            mean = grouped.transform('mean')
+            std = grouped.transform(lambda values: values.std(ddof=0))
+            result[f'{feature}_cs_zscore'] = ((result[feature] - mean) / std).where(std != 0)
+        return result
+
+    expressions = []
+    for feature in feature_cols:
+        values = pl.col(feature).fill_nan(None)
+        mean = values.mean().over(time_col)
+        std = values.std(ddof=0).over(time_col)
+        expressions.append(
+            pl.when(std > 0)
+            .then((values - mean) / std)
+            .otherwise(None)
+            .alias(f'{feature}_cs_zscore'),
+        )
+
+    return df.with_columns(expressions)
+
 def rolling_rank(
         df: pd.DataFrame | pl.DataFrame,
         feature_cols: str | list[str],
@@ -254,3 +322,91 @@ def rolling_rank(
         .alias(f'{feature}_rolling_rank_{window}')
         for feature in feature_cols
     ])
+
+
+def rolling_zscore(
+        df: pd.DataFrame | pl.DataFrame,
+        feature_cols: str | list[str],
+        window: int,
+        symbol_col: str = 'symbol',
+        time_col: str = 'time',
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Standardize feature values within trailing per-asset windows based on z-score.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Wide DataFrame with time_col, symbol_col, and the requested features.
+        Rows must be ordered chronologically within each asset.
+    feature_cols : str | list[str]
+        Feature columns standardized within every trailing window.
+    window : int
+        Positive number of observations in each trailing causal window.
+    symbol_col : str, default 'symbol'
+        Asset identifier used to isolate rolling calculations.
+    time_col : str, default 'time'
+        Time column validated within each asset.
+
+    Returns
+    -------
+    pd.DataFrame | pl.DataFrame
+        Input columns plus ``{feature}_rolling_zscore_{window}`` columns.
+        Every valid window uses its population standard deviation (``ddof=0``).
+
+    Raises
+    ------
+    KeyError
+        If a required column is absent.
+    TypeError
+        If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
+    ValueError
+        If df is empty, a required column is entirely missing, feature_cols is
+        empty, window is invalid, or times are invalid within an asset.
+
+    Notes
+    -----
+    The current value is included in its trailing window. A full window of
+    non-missing values is required. Constant windows return missing values.
+    """
+    feature_cols = _normalize_feature_cols(feature_cols)
+    _validate_positive_integer(window, 'window')
+    _validate_df(df, [symbol_col, time_col] + feature_cols)
+    _validate_temporal_order_by_symbol(df, symbol_col, time_col)
+
+    if isinstance(df, pd.DataFrame):
+        result = df.copy()
+        for feature in feature_cols:
+            grouped = result.groupby(symbol_col, sort=False)[feature]
+            mean = grouped.transform(
+                lambda values: values.rolling(window, min_periods=window).mean(),
+            )
+            std = grouped.transform(
+                lambda values: values.rolling(window, min_periods=window).std(ddof=0),
+            )
+            result[f'{feature}_rolling_zscore_{window}'] = (
+                (result[feature] - mean) / std
+            ).where(std != 0)
+        return result
+
+    expressions = []
+    for feature in feature_cols:
+        values = pl.col(feature).fill_nan(None)
+        mean = values.rolling_mean(
+            window_size=window,
+            min_samples=window,
+        ).over(symbol_col)
+        std = values.rolling_std(
+            window_size=window,
+            min_samples=window,
+            ddof=0,
+        ).over(symbol_col)
+        expressions.append(
+            pl.when(std > 0)
+            .then((values - mean) / std)
+            .otherwise(None)
+            .alias(f'{feature}_rolling_zscore_{window}'),
+        )
+
+    return df.with_columns(expressions)
+
