@@ -15,6 +15,11 @@ from alpha_research.evaluation.ic import (
     _generate_target_frames,
     information_coefficient,
 )
+from alpha_research.evaluation.partial import (
+    _normalize_covariates,
+    _validate_partial_columns,
+    partial_correlation,
+)
 from alpha_research.evaluation.statistical_tests import (
     fdr_correction,
     wald_temporal_association_test,
@@ -32,7 +37,9 @@ from alpha_research.resampling.block_bootstrap import (
 
 __all__ = [
     'temporal_association',
+    'partial_temporal_association',
     'temporal_association_summary_table',
+    'partial_temporal_association_summary_table',
     'TemporalAssociationDecayResult',
     'temporal_association_decay',
     'TemporalAssociationDecaySummaryResult',
@@ -89,6 +96,7 @@ def _select_valid_temporal_pairs(
         df: pd.DataFrame | pl.DataFrame,
         feature: str,
         target: str,
+        covariates: list[str] | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Select paired non-missing feature and target observations.
@@ -96,18 +104,21 @@ def _select_valid_temporal_pairs(
     Parameters
     ----------
     df : pd.DataFrame | pl.DataFrame
-        DataFrame containing feature and target columns. The caller is
+        DataFrame containing feature, target, and optional covariate columns. The caller is
         responsible for validating the temporal data contract first.
     feature : str
         Feature column name.
     target : str
         Target column name.
+    covariates : list[str] | None, default None
+        Optional covariate columns that must be observed alongside the feature
+        and target.
 
     Returns
     -------
     pd.DataFrame | pl.DataFrame
-        Feature and target columns only, excluding rows where either value is
-        null or NaN. The input backend and original row order are preserved.
+        Selected columns, excluding rows where any selected value is null or
+        NaN. The input backend and original row order are preserved.
 
     Raises
     ------
@@ -116,16 +127,17 @@ def _select_valid_temporal_pairs(
     TypeError
         If df is not a Pandas or Polars DataFrame.
     """
-    _validate_df(df, [feature, target])
+    columns = [feature, target, *(covariates or [])]
+    _validate_df(df, columns)
 
     if isinstance(df, pd.DataFrame):
-        return df[[feature, target]].dropna()
+        return df[columns].dropna()
 
     return (
         df
-        .select([feature, target])
-        .drop_nulls([feature, target])
-        .drop_nans([feature, target])
+        .select(columns)
+        .drop_nulls(columns)
+        .drop_nans(columns)
     )
 
 
@@ -194,6 +206,75 @@ def temporal_association(
         aligned[feature],
         aligned[target],
         corr_method=corr_method,
+    )
+
+
+def partial_temporal_association(
+        df: pd.DataFrame | pl.DataFrame,
+        feature: str,
+        target: str,
+        covariates: str | list[str],
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        time_col: str = 'time',
+        symbol_col: str = 'symbol',
+        min_n: int | None = None,
+) -> float:
+    """
+    Compute a feature-target partial association along one asset's time axis.
+
+    This is the controlled counterpart to ``temporal_association()``. It
+    conditions both series on one or more covariates while retaining the
+    single-asset and ordered-time requirements of a temporal analysis.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Single-asset temporal DataFrame in increasing, unique time order.
+    feature, target : str
+        Feature and target columns whose association is measured.
+    covariates : str | list[str]
+        One or more columns conditioned on by the feature and target.
+    corr_method : {'pearson', 'spearman'}, default 'spearman'
+        Partial-correlation estimator. Spearman ranks each selected variable
+        before residualization.
+    time_col : str, default 'time'
+        Temporal key column.
+    symbol_col : str, default 'symbol'
+        Single-asset identifier column.
+    min_n : int | None, default None
+        Optional additional complete-observation threshold.
+
+    Returns
+    -------
+    float
+        Partial temporal association, or nan when the controlled association
+        is undefined.
+
+    Raises
+    ------
+    KeyError
+        If a selected column is absent.
+    TypeError
+        If df or a partial-correlation argument has an unsupported type.
+    ValueError
+        If the temporal or partial-correlation specification is invalid.
+    """
+    normalized_covariates = _normalize_covariates(covariates)
+    _validate_partial_columns(feature, target, normalized_covariates)
+    _validate_df(
+        df,
+        [time_col, symbol_col, feature, target, *normalized_covariates],
+    )
+    _validate_single_symbol(df, symbol_col)
+    _validate_time_order(df, time_col)
+
+    return partial_correlation(
+        df=df,
+        feature=feature,
+        target=target,
+        covariates=normalized_covariates,
+        corr_method=corr_method,
+        min_n=min_n,
     )
 
 
@@ -793,6 +874,160 @@ def temporal_association_summary_table(
             'alpha': test_result.alpha,
             'n_bootstraps': metrics.n_bootstraps,
             'feature_group': feature_group,
+        })
+
+    if isinstance(df, pd.DataFrame):
+        return pd.DataFrame(rows)
+
+    return pl.DataFrame(rows)
+
+
+def partial_temporal_association_summary_table(
+        df: pd.DataFrame | pl.DataFrame,
+        feature_list: list[str],
+        target: str,
+        covariates: str | list[str],
+        block_length: int,
+        n_bootstraps: int,
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        step: int = 1,
+        confidence_level: float = 0.95,
+        random_state: int | None = None,
+        time_col: str = 'time',
+        symbol_col: str = 'symbol',
+        feature_groups: dict[str, str] | None = None,
+        min_n: int | None = None,
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Summarize controlled temporal associations for one or more features.
+
+    Each feature-target association is conditioned on the same covariates.
+    Moving Block Bootstrap resamples the complete feature-target-covariate
+    rows, preserving their local temporal dependence before the partial
+    correlation is recomputed. The resulting uncertainty is tested with the
+    established two-sided Wald procedure; FDR remains a separate operation.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Single-asset temporal DataFrame in increasing, unique time order.
+    feature_list : list[str]
+        Feature columns to evaluate. It must be non-empty and unique.
+    target : str
+        Target column to associate with every feature.
+    covariates : str | list[str]
+        One or more columns controlled for in every association.
+    block_length : int
+        Candidate block size passed to generate_moving_blocks().
+    n_bootstraps : int
+        Number of Moving Block Bootstrap samples per feature.
+    corr_method : {'pearson', 'spearman'}, default 'spearman'
+        Partial-correlation estimator for observed and bootstrap estimates.
+    step : int, default 1
+        Candidate-block start increment passed to generate_moving_blocks().
+    confidence_level : float, default 0.95
+        Confidence level used for bootstrap metrics and the Wald test.
+    random_state : int | None, default None
+        Reproducible seed passed to moving_block_bootstrap() per feature.
+    time_col, symbol_col : str
+        Temporal and single-asset identifier columns.
+    feature_groups : dict[str, str] | None, default None
+        Optional semantic group mapping used as FDR metadata.
+    min_n : int | None, default None
+        Optional additional complete-observation threshold for every observed
+        and bootstrap partial association.
+
+    Returns
+    -------
+    pd.DataFrame | pl.DataFrame
+        One row per feature with partial association, bootstrap metrics,
+        Wald-test results, the covariate specification, and feature metadata.
+
+    Raises
+    ------
+    KeyError
+        If a selected column is absent.
+    TypeError
+        If df or a downstream argument has an unsupported type.
+    ValueError
+        If feature_list, the temporal contract, the partial-correlation
+        specification, or a resampling/test input is invalid.
+    """
+    if not feature_list:
+        raise ValueError('feature_list must not be empty.')
+    if len(set(feature_list)) != len(feature_list):
+        raise ValueError('feature_list must not contain duplicates.')
+
+    normalized_covariates = _normalize_covariates(covariates)
+    if any(feature in normalized_covariates for feature in feature_list):
+        raise ValueError('feature_list must not contain covariate columns.')
+
+    rows = []
+    for feature in feature_list:
+        observed_association = partial_temporal_association(
+            df=df,
+            feature=feature,
+            target=target,
+            covariates=normalized_covariates,
+            corr_method=corr_method,
+            time_col=time_col,
+            symbol_col=symbol_col,
+            min_n=min_n,
+        )
+        valid_observations = _select_valid_temporal_pairs(
+            df,
+            feature,
+            target,
+            normalized_covariates,
+        )
+        blocks = generate_moving_blocks(valid_observations, block_length, step)
+        bootstrap_samples = moving_block_bootstrap(
+            blocks,
+            sample_size=len(valid_observations),
+            n_bootstraps=n_bootstraps,
+            random_state=random_state,
+        )
+        bootstrap_estimates = [
+            partial_correlation(
+                sample,
+                feature=feature,
+                target=target,
+                covariates=normalized_covariates,
+                corr_method=corr_method,
+                min_n=min_n,
+            )
+            for sample in bootstrap_samples
+        ]
+        metrics = bootstrap_metrics(bootstrap_estimates, confidence_level)
+        test_result = wald_temporal_association_test(
+            observed_association=observed_association,
+            bootstrap_standard_error=metrics.std,
+            confidence_level=confidence_level,
+        )
+        feature_group = (
+            feature_groups.get(feature, 'ungrouped')
+            if feature_groups is not None
+            else 'ungrouped'
+        )
+
+        rows.append({
+            'feature': feature,
+            'association': observed_association,
+            'corr_method': corr_method,
+            'n_obs': len(valid_observations),
+            'bootstrap_mean': metrics.mean,
+            'bootstrap_std': metrics.std,
+            'bootstrap_pct_positive': metrics.pct_positive,
+            'test_statistic': test_result.test_statistic,
+            'p_value': test_result.p_value,
+            'reject_h0': test_result.reject_h0,
+            'wald_ci_lower': test_result.wald_ci_lower,
+            'wald_ci_upper': test_result.wald_ci_upper,
+            'confidence_level': test_result.confidence_level,
+            'alpha': test_result.alpha,
+            'n_bootstraps': metrics.n_bootstraps,
+            'feature_group': feature_group,
+            'covariates': ', '.join(normalized_covariates),
         })
 
     if isinstance(df, pd.DataFrame):

@@ -12,7 +12,11 @@ from alpha_research.evaluation.ic import (
     ic_decay_summary_table,
     ic_summary_table,
     information_coefficient,
+    PartialICSummaryResult,
+    partial_ic_summary_table,
+    partial_information_coefficient,
 )
+from alpha_research.evaluation.partial import partial_correlation
 
 
 # ------------------------------------------------------
@@ -1137,4 +1141,124 @@ def test_ic_decay_summary_table_duplicate_feature_list_raises(
             target_data=decay_target_data_pandas,
             horizons=[1, 2],
             target_fn=target_fn,
+        )
+
+
+# ------------------------------------------------------
+# partial_information_coefficient
+# ------------------------------------------------------
+@pytest.fixture
+def partial_ic_data_pandas():
+    """Create controlled cross-sections across dates for partial IC tests."""
+    rng = np.random.default_rng(321)
+    frames = []
+    for day in pd.date_range('2024-01-01', periods=8, freq='D'):
+        covariate_a = rng.normal(size=48)
+        covariate_b = rng.normal(size=48)
+        feature = 0.8 * covariate_a - 0.4 * covariate_b
+        feature += rng.normal(scale=0.7, size=48)
+        target = 0.6 * feature + 0.7 * covariate_a + 0.3 * covariate_b
+        target += rng.normal(scale=0.7, size=48)
+        frames.append(pd.DataFrame({
+            'time': day,
+            'feature': feature,
+            'target': target,
+            'covariate_a': covariate_a,
+            'covariate_b': covariate_b,
+        }))
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_partial_information_coefficient_matches_each_cross_section(
+        partial_ic_data_pandas,
+):
+    """Partial IC should equal the controlled correlation at every date."""
+    result = partial_information_coefficient(
+        partial_ic_data_pandas,
+        feature='feature',
+        target='target',
+        covariates=['covariate_a', 'covariate_b'],
+    )
+    expected = [
+        partial_correlation(
+            group,
+            'feature',
+            'target',
+            covariates=['covariate_a', 'covariate_b'],
+        )
+        for _, group in partial_ic_data_pandas.groupby('time')
+    ]
+
+    assert result.columns.tolist() == ['time', 'partial_ic']
+    assert result['partial_ic'].to_numpy() == pytest.approx(expected)
+
+
+def test_partial_information_coefficient_preserves_native_polars_backend(
+        monkeypatch,
+        partial_ic_data_pandas,
+):
+    """Partial IC should preserve Polars without converting through Pandas."""
+    polars_df = pl.from_pandas(partial_ic_data_pandas)
+
+    def fail_to_pandas(*args, **kwargs):
+        raise AssertionError('Partial IC must not call to_pandas().')
+
+    monkeypatch.setattr(pl.DataFrame, 'to_pandas', fail_to_pandas)
+    result = partial_information_coefficient(
+        polars_df,
+        feature='feature',
+        target='target',
+        covariates='covariate_a',
+    )
+
+    assert isinstance(result, pl.DataFrame)
+    assert result.columns == ['time', 'partial_ic']
+
+
+# -----------------------------------------------
+# partial_ic_summary_table
+# -----------------------------------------------
+def test_partial_ic_summary_table_returns_metrics_and_partial_frames(
+        partial_ic_data_pandas,
+):
+    """The summary should preserve IC metrics and record the controls used."""
+    result = partial_ic_summary_table(
+        partial_ic_data_pandas,
+        feature_list=['feature'],
+        target='target',
+        covariates=['covariate_a', 'covariate_b'],
+        feature_groups={'feature': 'candidate'},
+    )
+
+    assert isinstance(result, PartialICSummaryResult)
+    assert result.table.loc[0, 'covariates'] == 'covariate_a, covariate_b'
+    assert result.table.loc[0, 'feature_group'] == 'candidate'
+    assert result.table.loc[0, 'n_obs'] == len(result.partial_ic_frames['feature'])
+    assert result.table.loc[0, 'mean'] == pytest.approx(
+        result.partial_ic_frames['feature']['partial_ic'].mean(),
+    )
+
+
+@pytest.mark.parametrize(
+    ('feature_list', 'covariates', 'message'),
+    [
+        ([], ['covariate_a'], 'must not be empty'),
+        (['feature', 'feature'], ['covariate_a'], 'must not contain duplicates'),
+        (['covariate_a'], ['covariate_a'], 'must not contain covariate'),
+    ],
+)
+def test_partial_ic_summary_table_validates_feature_roles(
+        partial_ic_data_pandas,
+        feature_list,
+        covariates,
+        message,
+):
+    """A partial IC summary should reject invalid feature/covariate roles."""
+    with pytest.raises(ValueError, match=message):
+        partial_ic_summary_table(
+            partial_ic_data_pandas,
+            feature_list=feature_list,
+            target='target',
+            covariates=covariates,
         )
