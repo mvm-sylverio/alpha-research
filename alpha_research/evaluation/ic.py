@@ -8,6 +8,11 @@ from typing import Literal, Callable
 from scipy.stats import pearsonr, spearmanr
 
 from alpha_research.evaluation.statistical_tests import newey_west_tstat, fdr_correction
+from alpha_research.evaluation.partial import (
+    _normalize_covariates,
+    _validate_partial_columns,
+    partial_correlation,
+)
 from alpha_research._utils import (
     _is_constant_series,
     _validate_df,
@@ -15,7 +20,9 @@ from alpha_research._utils import (
 )
 from alpha_research.features.schema import get_feature_name, join_feature_target_frames
 
-__all__ = ['information_coefficient', 'compute_ic', 'ICMetrics', 'compute_ic_metrics', 'ic_summary_table', 'ic_decay',
+__all__ = ['information_coefficient', 'compute_ic', 'partial_information_coefficient',
+           'ICMetrics', 'compute_ic_metrics', 'ic_summary_table',
+           'PartialICSummaryResult', 'partial_ic_summary_table', 'ic_decay',
            'ic_decay_summary', 'ic_decay_summary_table']
 
 DataFrame = pd.DataFrame | pl.DataFrame
@@ -175,6 +182,97 @@ def compute_ic(
         return _compute_ic_pandas(df, feature, target, corr_method, date_column, ic_column)
     else: # pl.Dataframe type
         return _compute_ic_polars(df, feature, target, corr_method, date_column, ic_column)
+
+
+def partial_information_coefficient(
+        df: pd.DataFrame | pl.DataFrame,
+        feature: str,
+        target: str,
+        covariates: str | list[str],
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        date_column: str = 'time',
+        ic_column: str = 'partial_ic',
+        min_n: int | None = None,
+) -> pd.DataFrame | pl.DataFrame:
+    """
+    Compute cross-sectional partial information coefficients by date.
+
+    Each date's feature-target association is conditioned on the same one or
+    more covariates. Invalid or undersized cross-sections are omitted, matching
+    the established IC behavior for undefined correlations.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Cross-sectional DataFrame containing date, feature, target, and
+        covariate columns.
+    feature, target : str
+        Feature and target column names.
+    covariates : str | list[str]
+        One or more columns conditioned on within every cross-section.
+    corr_method : {'pearson', 'spearman'}, default 'spearman'
+        Partial-correlation estimator used per date.
+    date_column : str, default 'time'
+        Cross-sectional date identifier.
+    ic_column : str, default 'partial_ic'
+        Name assigned to the partial IC output column.
+    min_n : int | None, default None
+        Optional additional complete-observation threshold per date.
+
+    Returns
+    -------
+    pd.DataFrame | pl.DataFrame
+        Input-backend DataFrame with date_column and ic_column, sorted by date.
+
+    Raises
+    ------
+    KeyError
+        If a selected column is absent.
+    TypeError
+        If df or a partial-correlation argument has an unsupported type.
+    ValueError
+        If the partial-correlation specification is invalid.
+    """
+    normalized_covariates = _normalize_covariates(covariates)
+    _validate_partial_columns(feature, target, normalized_covariates)
+    _validate_df(df, [date_column, feature, target, *normalized_covariates])
+
+    rows = []
+    if isinstance(df, pd.DataFrame):
+        for date, group in df.groupby(date_column, sort=True):
+            partial_ic = partial_correlation(
+                group,
+                feature=feature,
+                target=target,
+                covariates=normalized_covariates,
+                corr_method=corr_method,
+                min_n=min_n,
+            )
+            if np.isfinite(partial_ic):
+                rows.append({date_column: date, ic_column: partial_ic})
+
+        return pd.DataFrame(rows, columns=[date_column, ic_column])
+
+    for group in df.sort(date_column).partition_by(date_column, maintain_order=True):
+        date = group[date_column][0]
+        partial_ic = partial_correlation(
+            group,
+            feature=feature,
+            target=target,
+            covariates=normalized_covariates,
+            corr_method=corr_method,
+            min_n=min_n,
+        )
+        if np.isfinite(partial_ic):
+            rows.append({date_column: date, ic_column: partial_ic})
+
+    if not rows:
+        return pl.DataFrame(schema={
+            date_column: df.schema[date_column],
+            ic_column: pl.Float64,
+        })
+
+    return pl.DataFrame(rows).cast({ic_column: pl.Float64})
 
 
 @dataclass(frozen=True, slots=True)  # unchangable object results and attributes
@@ -394,6 +492,128 @@ def ic_summary_table(
         return ICSummaryResult(pd.DataFrame(rows), ic_dfs_dict)
     else:  # type already checked when calling compute_ic, else means pl.DataFrame
         return ICSummaryResult(pl.DataFrame(rows), ic_dfs_dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PartialICSummaryResult:
+    """
+    Result of partial_ic_summary_table computation.
+
+    Attributes
+    ----------
+    table : pd.DataFrame | pl.DataFrame
+        Summary table with partial IC metrics and Newey-West statistics per
+        feature.
+    partial_ic_frames : dict[str, pd.DataFrame | pl.DataFrame]
+        Partial IC time series per feature. Each DataFrame contains the date
+        column and the partial IC column.
+    """
+    table: pd.DataFrame | pl.DataFrame
+    partial_ic_frames: dict[str, pd.DataFrame | pl.DataFrame]
+
+
+def partial_ic_summary_table(
+        df: pd.DataFrame | pl.DataFrame,
+        feature_list: list[str],
+        target: str,
+        covariates: str | list[str],
+        corr_method: Literal['pearson', 'spearman'] = 'spearman',
+        date_column: str = 'time',
+        feature_groups: dict[str, str] | None = None,
+        min_n: int | None = None,
+) -> PartialICSummaryResult:
+    """
+    Summarize cross-sectional partial ICs for multiple features.
+
+    For every feature, each date's partial IC controls for the same covariates.
+    The resulting partial-IC time series is summarized with the established IC
+    metrics and Newey-West test for its mean. FDR correction is intentionally
+    left to ``fdr_correction()``.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Cross-sectional DataFrame containing all selected columns.
+    feature_list : list[str]
+        Features to evaluate. It must be non-empty and contain no duplicates.
+    target : str
+        Target column name.
+    covariates : str | list[str]
+        One or more columns conditioned on for every evaluated feature.
+    corr_method : {'pearson', 'spearman'}, default 'spearman'
+        Partial-correlation estimator used per cross-section.
+    date_column : str, default 'time'
+        Cross-sectional date identifier.
+    feature_groups : dict[str, str] | None, default None
+        Optional semantic group mapping used as FDR metadata.
+    min_n : int | None, default None
+        Optional additional complete-observation threshold per cross-section.
+
+    Returns
+    -------
+    PartialICSummaryResult
+        Summary table and partial IC time-series frame for each feature.
+
+    Raises
+    ------
+    KeyError
+        If a selected column is absent.
+    TypeError
+        If df or a partial-correlation argument has an unsupported type.
+    ValueError
+        If feature_list or the partial-correlation specification is invalid.
+    """
+    if not feature_list:
+        raise ValueError('feature_list must not be empty.')
+    if len(set(feature_list)) != len(feature_list):
+        raise ValueError('feature_list must not contain duplicates.')
+
+    normalized_covariates = _normalize_covariates(covariates)
+    if any(feature in normalized_covariates for feature in feature_list):
+        raise ValueError('feature_list must not contain covariate columns.')
+
+    rows = []
+    partial_ic_frames = {}
+    for feature in feature_list:
+        partial_ic_frame = partial_information_coefficient(
+            df=df,
+            feature=feature,
+            target=target,
+            covariates=normalized_covariates,
+            corr_method=corr_method,
+            date_column=date_column,
+            min_n=min_n,
+        )
+        partial_ic_frames[feature] = partial_ic_frame
+        partial_ic_series = partial_ic_frame['partial_ic']
+        metrics = compute_ic_metrics(partial_ic_series)
+        nw_test = newey_west_tstat(partial_ic_series)
+        feature_group = (
+            feature_groups.get(feature, 'ungrouped')
+            if feature_groups is not None
+            else 'ungrouped'
+        )
+
+        rows.append({
+            'feature': feature,
+            'mean': metrics.mean,
+            'abs_mean': metrics.abs_mean,
+            'sign': metrics.sign,
+            'std': metrics.std,
+            'stability': metrics.stability,
+            'pct_positive': metrics.pct_positive,
+            'quantile25': metrics.quantiles['q25'],
+            'quantile50': metrics.quantiles['q50'],
+            'quantile75': metrics.quantiles['q75'],
+            't_stat': nw_test.t_stat,
+            'p_value': nw_test.p_value,
+            'feature_group': feature_group,
+            'n_obs': len(partial_ic_series),
+            'covariates': ', '.join(normalized_covariates),
+        })
+
+    table = pd.DataFrame(rows) if isinstance(df, pd.DataFrame) else pl.DataFrame(rows)
+    return PartialICSummaryResult(table, partial_ic_frames)
 
 
 @dataclass(frozen=True, slots=True)
