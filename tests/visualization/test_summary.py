@@ -7,12 +7,16 @@ import pytest
 
 from alpha_research.visualization import (
     plot_ic_summary,
+    plot_partial_ic_summary,
+    plot_partial_temporal_association_summary,
     plot_temporal_association_summary,
 )
 from alpha_research.visualization.summary import (
+    _add_covariates_note,
     _create_axis,
     _plot_ranked_estimates,
     _prepare_ranked_summary,
+    _resolve_covariates_label,
     _resolve_significance_column,
     _significance_labels,
     _validate_ranking_arguments,
@@ -263,6 +267,63 @@ def test_create_axis_validates_feature_count(n_features):
         _create_axis(None, n_features=n_features)
 
 
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_resolve_covariates_label_infers_one_shared_specification(backend):
+    """Partial plots should infer their one shared control specification."""
+    table = pd.DataFrame({'covariates': ['market, volatility', 'market, volatility']})
+    table = table if backend == 'pandas' else pl.from_pandas(table)
+
+    assert _resolve_covariates_label(table, 'covariates', None) == 'market, volatility'
+
+
+def test_resolve_covariates_label_allows_an_explicit_override():
+    """An explicit label should support custom tables without metadata columns."""
+    table = pd.DataFrame({'feature': ['signal']})
+
+    assert _resolve_covariates_label(
+        table,
+        'covariates',
+        'Market and realized volatility',
+    ) == 'Market and realized volatility'
+
+
+@pytest.mark.parametrize(
+    ('table', 'covariates_col', 'covariates_label', 'error_type', 'message'),
+    [
+        (pd.DataFrame({'feature': ['signal']}), 'covariates', None, KeyError, 'missing required columns'),
+        (pd.DataFrame({'covariates': [None]}), 'covariates', None, ValueError, 'must contain'),
+        (pd.DataFrame({'covariates': ['a', 'b']}), 'covariates', None, ValueError, 'one shared'),
+        (pd.DataFrame({'covariates': ['a']}), 1, None, TypeError, 'covariates_col'),
+        (pd.DataFrame({'covariates': ['a']}), 'covariates', 1, TypeError, 'covariates_label'),
+        (pd.DataFrame({'covariates': ['a']}), 'covariates', ' ', ValueError, 'must not be empty'),
+    ],
+)
+def test_resolve_covariates_label_validates_input(
+        table,
+        covariates_col,
+        covariates_label,
+        error_type,
+        message,
+):
+    """The covariate-label helper should reject ambiguous plot context."""
+    with pytest.raises(error_type, match=message):
+        _resolve_covariates_label(table, covariates_col, covariates_label)
+
+
+def test_add_covariates_note_adds_visible_context_to_axis():
+    """The annotation helper should place the controls on the supplied axis."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots()
+    _add_covariates_note(axis, 'market, volatility', 'Partial result')
+
+    assert axis.get_title() == 'Partial result'
+    assert axis.texts[0].get_text() == 'Conditioned on: market, volatility'
+    plt.close(figure)
+
+
 # ------------------------------------------------------
 # plot functions
 # ------------------------------------------------------
@@ -309,6 +370,32 @@ def test_plot_ic_summary_accepts_uncorrected_results(ic_summary_table_pandas):
 
     assert axis.get_legend() is None
     assert len(axis.collections) == 1
+    plt.close(figure)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_plot_partial_ic_summary_returns_axis_and_identifies_covariates(
+        ic_summary_table_pandas,
+        backend,
+):
+    """The partial IC wrapper should retain context while composing on an axis."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    table = ic_summary_table_pandas.assign(
+        covariates='market_return, realized_volatility',
+    )
+    table = table if backend == 'pandas' else pl.from_pandas(table)
+    figure, axis = plt.subplots()
+    returned_axis = plot_partial_ic_summary(table, ax=axis, title='Partial IC')
+
+    assert returned_axis is axis
+    assert axis.get_xlabel() == 'Mean partial information coefficient'
+    assert axis.get_title() == 'Partial IC'
+    assert axis.texts[0].get_text() == (
+        'Conditioned on: market_return, realized_volatility'
+    )
     plt.close(figure)
 
 
@@ -364,6 +451,28 @@ def test_plot_temporal_association_summary_prefers_fdr_decisions(
     plot_temporal_association_summary(corrected_table, ax=axis)
 
     assert axis.get_legend().get_texts()[0].get_text() == 'Passed FDR correction'
+    plt.close(figure)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_plot_partial_temporal_summary_returns_axis_and_identifies_covariates(
+        temporal_summary_table_pandas,
+        backend,
+):
+    """The partial forest wrapper should retain its controls and Wald intervals."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    table = temporal_summary_table_pandas.assign(covariates='market_return')
+    table = table if backend == 'pandas' else pl.from_pandas(table)
+    figure, axis = plt.subplots()
+    returned_axis = plot_partial_temporal_association_summary(table, ax=axis)
+
+    assert returned_axis is axis
+    assert axis.get_xlabel() == 'Partial temporal association'
+    assert axis.texts[0].get_text() == 'Conditioned on: market_return'
+    assert len(axis.containers) == 2
     plt.close(figure)
 
 

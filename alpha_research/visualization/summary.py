@@ -8,7 +8,9 @@ from alpha_research._utils import _validate_df, _validate_df_type
 
 __all__ = [
     'plot_ic_summary',
+    'plot_partial_ic_summary',
     'plot_temporal_association_summary',
+    'plot_partial_temporal_association_summary',
 ]
 
 
@@ -428,6 +430,101 @@ def _create_axis(ax: Any, n_features: int) -> tuple[Any, bool]:
     return ax, True
 
 
+def _resolve_covariates_label(
+        summary_table: pd.DataFrame | pl.DataFrame,
+        covariates_col: str,
+        covariates_label: str | None,
+) -> str:
+    """
+    Resolve a single visible covariate specification for a partial-summary plot.
+
+    Parameters
+    ----------
+    summary_table : pd.DataFrame | pl.DataFrame
+        Partial-summary table containing the covariate metadata when no label
+        is supplied explicitly.
+    covariates_col : str
+        Column that records the covariates used in each table row.
+    covariates_label : str | None
+        Explicit label used instead of reading covariates_col.
+
+    Returns
+    -------
+    str
+        Human-readable covariate specification shown on the plot.
+
+    Raises
+    ------
+    TypeError
+        If the table or label arguments have unsupported types.
+    KeyError
+        If covariates_col is absent and no explicit label is supplied.
+    ValueError
+        If an inferred label is missing or inconsistent across rows.
+    """
+    _validate_df_type(summary_table)
+    if not isinstance(covariates_col, str):
+        raise TypeError('covariates_col must be a string.')
+    if covariates_label is not None:
+        if not isinstance(covariates_label, str):
+            raise TypeError('covariates_label must be a string or None.')
+        if not covariates_label.strip():
+            raise ValueError('covariates_label must not be empty.')
+        return covariates_label
+
+    _validate_df(summary_table, [covariates_col], check_all_missing=False)
+    values = (
+        summary_table[covariates_col].dropna().astype(str).unique().tolist()
+        if isinstance(summary_table, pd.DataFrame)
+        else summary_table[covariates_col].drop_nulls().cast(pl.String).unique().to_list()
+    )
+    if not values:
+        raise ValueError(f'{covariates_col} must contain a covariate specification.')
+    if len(values) != 1:
+        raise ValueError(
+            f'{covariates_col} must contain one shared covariate specification.',
+        )
+
+    return values[0]
+
+
+def _add_covariates_note(
+        ax: Any,
+        covariates_label: str,
+        title: str | None,
+) -> None:
+    """
+    Add a visible partial-correlation covariate note to an axis.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis receiving the note.
+    covariates_label : str
+        Human-readable covariate specification.
+    title : str | None
+        Optional title whose padding is increased to avoid overlapping the
+        covariate note.
+
+    Returns
+    -------
+    None
+        The supplied axis is modified in place.
+    """
+    if title is not None:
+        ax.set_title(title, pad=24)
+    ax.text(
+        0.0,
+        1.02,
+        f'Conditioned on: {covariates_label}',
+        transform=ax.transAxes,
+        ha='left',
+        va='bottom',
+        color='0.35',
+        fontsize='small',
+    )
+
+
 def plot_ic_summary(
         summary_table: pd.DataFrame | pl.DataFrame,
         top_n: int | None = None,
@@ -616,6 +713,166 @@ def plot_temporal_association_summary(
     ax.set_ylabel('Feature')
     if title is not None:
         ax.set_title(title)
+    if created_axis:
+        ax.figure.tight_layout()
+
+    return ax
+
+
+def plot_partial_ic_summary(
+        summary_table: pd.DataFrame | pl.DataFrame,
+        top_n: int | None = None,
+        sort_by: Literal['absolute', 'value'] = 'absolute',
+        significance_col: str | None = None,
+        ax: Any = None,
+        feature_col: str = 'feature',
+        value_col: str = 'mean',
+        covariates_col: str = 'covariates',
+        covariates_label: str | None = None,
+        color: str = 'C0',
+        non_significant_color: str = '0.65',
+        title: str | None = None,
+) -> Any:
+    """
+    Plot ranked mean partial information coefficients.
+
+    This is the partial-IC counterpart to ``plot_ic_summary()``. The plot
+    always states the covariates conditioned on, using the summary table's
+    metadata by default or a caller-provided label.
+
+    Parameters
+    ----------
+    summary_table : pd.DataFrame | pl.DataFrame
+        Table returned by ``partial_ic_summary_table().table``, optionally
+        passed through ``fdr_correction()``.
+    top_n, sort_by, significance_col, ax, feature_col, value_col, color,
+    non_significant_color, title
+        Have the same meaning as in ``plot_ic_summary()``.
+    covariates_col : str, default 'covariates'
+        Column containing the shared covariate specification.
+    covariates_label : str | None, default None
+        Explicit covariate text shown on the chart. When None, the label is
+        inferred from covariates_col, which must contain one shared value.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        Axis containing the ranked partial IC plot and covariate note.
+
+    Raises
+    ------
+    ImportError
+        If Matplotlib is not installed. Install the optional ``viz`` extra.
+    KeyError
+        If a selected required column is absent.
+    TypeError
+        If the table or plotting arguments have unsupported types.
+    ValueError
+        If the ranking or covariate specification is invalid.
+    """
+    resolved_covariates_label = _resolve_covariates_label(
+        summary_table,
+        covariates_col,
+        covariates_label,
+    )
+    created_axis = ax is None
+    ax = plot_ic_summary(
+        summary_table,
+        top_n=top_n,
+        sort_by=sort_by,
+        significance_col=significance_col,
+        ax=ax,
+        feature_col=feature_col,
+        value_col=value_col,
+        color=color,
+        non_significant_color=non_significant_color,
+        title=title,
+    )
+    ax.set_xlabel('Mean partial information coefficient')
+    _add_covariates_note(ax, resolved_covariates_label, title)
+    if created_axis:
+        ax.figure.tight_layout()
+
+    return ax
+
+
+def plot_partial_temporal_association_summary(
+        summary_table: pd.DataFrame | pl.DataFrame,
+        top_n: int | None = None,
+        sort_by: Literal['absolute', 'value'] = 'absolute',
+        significance_col: str | None = None,
+        ax: Any = None,
+        feature_col: str = 'feature',
+        value_col: str = 'association',
+        ci_lower_col: str = 'wald_ci_lower',
+        ci_upper_col: str = 'wald_ci_upper',
+        covariates_col: str = 'covariates',
+        covariates_label: str | None = None,
+        color: str = 'C0',
+        non_significant_color: str = '0.65',
+        title: str | None = None,
+) -> Any:
+    """
+    Plot ranked partial temporal associations with Wald intervals.
+
+    This is the partial-association counterpart to
+    ``plot_temporal_association_summary()``. It visualizes the existing Wald
+    intervals and decision columns without recalculating either, and always
+    identifies the covariates that were controlled for.
+
+    Parameters
+    ----------
+    summary_table : pd.DataFrame | pl.DataFrame
+        Table returned by ``partial_temporal_association_summary_table()``,
+        optionally passed through ``fdr_correction()``.
+    top_n, sort_by, significance_col, ax, feature_col, value_col,
+    ci_lower_col, ci_upper_col, color, non_significant_color, title
+        Have the same meaning as in
+        ``plot_temporal_association_summary()``.
+    covariates_col : str, default 'covariates'
+        Column containing the shared covariate specification.
+    covariates_label : str | None, default None
+        Explicit covariate text shown on the chart. When None, the label is
+        inferred from covariates_col, which must contain one shared value.
+
+    Returns
+    -------
+    matplotlib.axes.Axes
+        Axis containing the partial-association forest plot and covariate note.
+
+    Raises
+    ------
+    ImportError
+        If Matplotlib is not installed. Install the optional ``viz`` extra.
+    KeyError
+        If a selected required column is absent.
+    TypeError
+        If the table or plotting arguments have unsupported types.
+    ValueError
+        If the ranking or covariate specification is invalid.
+    """
+    resolved_covariates_label = _resolve_covariates_label(
+        summary_table,
+        covariates_col,
+        covariates_label,
+    )
+    created_axis = ax is None
+    ax = plot_temporal_association_summary(
+        summary_table,
+        top_n=top_n,
+        sort_by=sort_by,
+        significance_col=significance_col,
+        ax=ax,
+        feature_col=feature_col,
+        value_col=value_col,
+        ci_lower_col=ci_lower_col,
+        ci_upper_col=ci_upper_col,
+        color=color,
+        non_significant_color=non_significant_color,
+        title=title,
+    )
+    ax.set_xlabel('Partial temporal association')
+    _add_covariates_note(ax, resolved_covariates_label, title)
     if created_axis:
         ax.figure.tight_layout()
 
