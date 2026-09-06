@@ -6,8 +6,10 @@ import numpy as np
 from alpha_research.features.transformations import (
     _normalize_feature_cols,
     _validate_temporal_order_by_symbol,
+    cross_sectional_quantile_rank,
     cross_sectional_rank,
     cross_sectional_zscore,
+    rolling_quantile_rank,
     rolling_rank,
     rolling_zscore,
 )
@@ -215,6 +217,52 @@ def test_cross_sectional_zscore_rejects_missing_feature_column(
 
 
 # ------------------------------------------------------
+# cross_sectional_quantile_ranks
+# ------------------------------------------------------
+def test_cross_sectional_quantile_rank_assigns_rank_based_groups(
+        multi_asset_features_pandas,
+):
+    """Should label the lower and upper member of each pair as groups one and two."""
+    result = cross_sectional_quantile_rank(
+        multi_asset_features_pandas,
+        'simple_ret_1',
+        n_quantiles=2,
+    )
+    np.testing.assert_allclose(
+        result['simple_ret_1_cs_quantile_rank_2'].to_numpy(),
+        [2.0, 1.0, 1.0, 2.0, 2.0, 1.0],
+    )
+
+
+def test_cross_sectional_quantile_rank_preserves_ties_and_skips_small_sections():
+    """Should not split tied values and should require enough values for all groups."""
+    df = pd.DataFrame({
+        'time': ['2024-01-01'] * 3 + ['2024-01-02'] * 2,
+        'symbol': ['AAPL', 'MSFT', 'GOOG', 'AAPL', 'MSFT'],
+        'feature': [1.0, 1.0, 3.0, 1.0, 2.0],
+    })
+    result = cross_sectional_quantile_rank(df, 'feature', n_quantiles=3)
+
+    assert result.loc[:1, 'feature_cs_quantile_rank_3'].tolist() == [2.0, 2.0]
+    assert result.loc[2, 'feature_cs_quantile_rank_3'] == 3.0
+    assert result.loc[3:, 'feature_cs_quantile_rank_3'].isna().all()
+
+
+@pytest.mark.parametrize('n_quantiles', [0, True, 1.5])
+def test_cross_sectional_quantile_rank_validates_quantile_count(
+        multi_asset_features_pandas,
+        n_quantiles,
+):
+    """Should require a positive integer number of quantile groups."""
+    with pytest.raises(ValueError, match='n_quantiles'):
+        cross_sectional_quantile_rank(
+            multi_asset_features_pandas,
+            'simple_ret_1',
+            n_quantiles=n_quantiles,
+        )
+
+
+# ------------------------------------------------------
 # rolling_rank
 # ------------------------------------------------------
 def test_rolling_rank_calculates_each_asset_independently(
@@ -259,3 +307,111 @@ def test_rolling_zscore_returns_missing_for_constant_window():
     })
     result = rolling_zscore(df, 'feature', window=3)
     assert result['feature_rolling_zscore_3'].isna().all()
+
+
+# ------------------------------------------------------
+# rolling_quantile_rank
+# ------------------------------------------------------
+def test_rolling_quantile_rank_assigns_groups_from_trailing_rank(
+        temporal_multi_asset_features_pandas,
+):
+    """Should assign the current observation to its rank-based trailing group."""
+    result = rolling_quantile_rank(
+        temporal_multi_asset_features_pandas,
+        'momentum',
+        window=3,
+        n_quantiles=2,
+    )
+
+    np.testing.assert_allclose(
+        result['momentum_rolling_quantile_rank_3_2'].to_numpy(),
+        [np.nan, np.nan, 2.0, 2.0, np.nan, np.nan, 1.0, 1.0],
+        equal_nan=True,
+    )
+
+
+def test_rolling_transformations_do_not_use_future_values(
+        temporal_multi_asset_features_pandas,
+):
+    """Should leave an already-computed rolling value unchanged after future edits."""
+    original = rolling_zscore(temporal_multi_asset_features_pandas, 'momentum', window=3)
+    changed_future = temporal_multi_asset_features_pandas.copy()
+    changed_future.loc[3, 'momentum'] = 10_000.0
+    changed = rolling_zscore(changed_future, 'momentum', window=3)
+
+    assert (
+        original.loc[2, 'momentum_rolling_zscore_3']
+        == changed.loc[2, 'momentum_rolling_zscore_3']
+    )
+
+
+@pytest.mark.parametrize('function, kwargs', [
+    (rolling_rank, {'window': 0}),
+    (rolling_zscore, {'window': True}),
+    (rolling_quantile_rank, {'window': 2, 'n_quantiles': 3}),
+])
+def test_rolling_transformations_validate_window_arguments(
+        temporal_multi_asset_features_pandas,
+        function,
+        kwargs,
+):
+    """Should reject invalid rolling-window and quantile configurations."""
+    with pytest.raises(ValueError):
+        function(temporal_multi_asset_features_pandas, 'momentum', **kwargs)
+
+
+def test_rolling_transformations_reject_unordered_asset_time(
+        temporal_multi_asset_features_pandas,
+):
+    """Should reject rows that would make the rolling calculation non-causal."""
+    unordered = temporal_multi_asset_features_pandas.copy()
+    unordered.loc[1, 'time'] = '2023-12-31'
+    with pytest.raises(ValueError, match='increasingly ordered'):
+        rolling_rank(unordered, 'momentum', window=3)
+
+
+@pytest.mark.parametrize('function, kwargs, output_col', [
+    (cross_sectional_zscore, {}, 'simple_ret_1_cs_zscore'),
+    (cross_sectional_quantile_rank, {'n_quantiles': 2}, 'simple_ret_1_cs_quantile_rank_2'),
+])
+def test_cross_sectional_transformations_match_polars(
+        multi_asset_features_pandas,
+        function,
+        kwargs,
+        output_col,
+):
+    """Should produce equivalent cross-sectional values in both DataFrame backends."""
+    pandas_result = function(multi_asset_features_pandas, 'simple_ret_1', **kwargs)
+    polars_result = function(pl.from_pandas(multi_asset_features_pandas), 'simple_ret_1', **kwargs)
+
+    np.testing.assert_allclose(
+        pandas_result[output_col].to_numpy(),
+        polars_result[output_col].to_numpy(),
+        equal_nan=True,
+    )
+
+
+@pytest.mark.parametrize('function, kwargs, output_col', [
+    (rolling_rank, {'window': 3}, 'momentum_rolling_rank_3'),
+    (rolling_zscore, {'window': 3}, 'momentum_rolling_zscore_3'),
+    (rolling_quantile_rank, {'window': 3, 'n_quantiles': 2}, 'momentum_rolling_quantile_rank_3_2'),
+])
+def test_rolling_transformations_match_polars(
+        temporal_multi_asset_features_pandas,
+        function,
+        kwargs,
+        output_col,
+):
+    """Should produce equivalent per-asset rolling values in both DataFrame backends."""
+    pandas_result = function(temporal_multi_asset_features_pandas, 'momentum', **kwargs)
+    polars_result = function(
+        pl.from_pandas(temporal_multi_asset_features_pandas),
+        'momentum',
+        **kwargs,
+    ).to_pandas()
+
+    np.testing.assert_allclose(
+        pandas_result[output_col].to_numpy(),
+        polars_result[output_col].to_numpy(),
+        equal_nan=True,
+    )
