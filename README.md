@@ -13,7 +13,10 @@ input DataFrame backend whenever practical.
 
 - Feature and target utilities: simple/log returns, forward returns, OHLC
   Triple-Barrier labels, trend features, volatility measures including realized
-  volatility and ATR, ADX, and cross-sectional ranking.
+  volatility and ATR, and ADX.
+- Feature transformations: cross-sectional rank, z-score, and rank-based
+  quantile groups; trailing per-asset rank, z-score, and rank-based quantile
+  groups.
 - Research data utilities: feature/target schema helpers and purged
   train/test splitting.
 - Cross-sectional information coefficient analysis with Pearson or Spearman
