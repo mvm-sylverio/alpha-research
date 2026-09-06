@@ -14,6 +14,8 @@ from alpha_research.evaluation.timeseries import (
     TemporalAssociationDecayResult,
     TemporalAssociationDecaySummaryTableResult,
     rolling_temporal_association,
+    partial_temporal_association,
+    partial_temporal_association_summary_table,
     summarize_rolling_temporal_association,
     temporal_association,
     temporal_association_decay,
@@ -22,6 +24,7 @@ from alpha_research.evaluation.timeseries import (
     temporal_association_summary_table,
 )
 from alpha_research.evaluation.ic import _generate_target_frames, information_coefficient
+from alpha_research.evaluation.partial import partial_correlation
 from alpha_research.evaluation.statistical_tests import wald_temporal_association_test
 from alpha_research.resampling.block_bootstrap import (
     BootstrapMetricsResults,
@@ -1498,4 +1501,140 @@ def test_temporal_association_decay_summary_table_pandas_polars_consistency(
             pandas_result.decay_results[feature].table,
             polars_result.decay_results[feature].table.to_pandas(),
             check_dtype=False,
+        )
+
+
+# ------------------------------------------------------
+# partial_temporal_association
+# ------------------------------------------------------
+@pytest.fixture
+def partial_temporal_data_pandas():
+    """Create one ordered asset with two controls for partial association tests."""
+    rng = np.random.default_rng(99)
+    n_obs = 48
+    covariate_a = rng.normal(size=n_obs)
+    covariate_b = rng.normal(size=n_obs)
+    feature = 0.8 * covariate_a - 0.4 * covariate_b
+    feature += rng.normal(scale=0.7, size=n_obs)
+    target = 0.6 * feature + 0.7 * covariate_a + 0.3 * covariate_b
+    target += rng.normal(scale=0.7, size=n_obs)
+    feature_b = -0.5 * covariate_a + 0.2 * covariate_b
+    feature_b += rng.normal(scale=0.8, size=n_obs)
+    return pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=n_obs, freq='D'),
+        'symbol': ['AAPL'] * n_obs,
+        'feature': feature,
+        'feature_b': feature_b,
+        'target': target,
+        'covariate_a': covariate_a,
+        'covariate_b': covariate_b,
+    })
+
+
+def test_partial_temporal_association_matches_controlled_definition(
+        partial_temporal_data_pandas,
+):
+    """The temporal API should use the same controlled correlation estimator."""
+    expected = partial_correlation(
+        partial_temporal_data_pandas,
+        'feature',
+        'target',
+        covariates=['covariate_a', 'covariate_b'],
+    )
+    result = partial_temporal_association(
+        partial_temporal_data_pandas,
+        feature='feature',
+        target='target',
+        covariates=['covariate_a', 'covariate_b'],
+    )
+
+    assert result == pytest.approx(expected)
+
+
+def test_partial_temporal_association_requires_one_ordered_symbol(
+        partial_temporal_data_pandas,
+):
+    """Partial temporal association should retain the temporal data contract."""
+    multiple_symbols = partial_temporal_data_pandas.copy()
+    multiple_symbols.loc[0, 'symbol'] = 'MSFT'
+
+    with pytest.raises(ValueError, match='exactly one'):
+        partial_temporal_association(
+            multiple_symbols,
+            'feature',
+            'target',
+            covariates='covariate_a',
+        )
+
+
+# ------------------------------------------------------
+# partial_temporal_association_summary_table
+# ------------------------------------------------------
+def test_partial_temporal_association_summary_table_returns_wald_results(
+        partial_temporal_data_pandas,
+):
+    """The controlled temporal summary should retain MBB and Wald diagnostics."""
+    result = partial_temporal_association_summary_table(
+        partial_temporal_data_pandas,
+        feature_list=['feature', 'feature_b'],
+        target='target',
+        covariates=['covariate_a', 'covariate_b'],
+        block_length=4,
+        n_bootstraps=30,
+        random_state=7,
+    )
+
+    assert result['feature'].tolist() == ['feature', 'feature_b']
+    assert result['covariates'].tolist() == [
+        'covariate_a, covariate_b',
+        'covariate_a, covariate_b',
+    ]
+    assert np.isfinite(result['association']).all()
+    assert np.isfinite(result['wald_ci_lower']).all()
+    assert np.isfinite(result['wald_ci_upper']).all()
+    assert result['n_bootstraps'].tolist() == [30, 30]
+
+
+def test_partial_temporal_association_summary_table_preserves_polars_backend(
+        partial_temporal_data_pandas,
+):
+    """Partial temporal summary should preserve Polars and fixed-seed results."""
+    kwargs = {
+        'feature_list': ['feature'],
+        'target': 'target',
+        'covariates': 'covariate_a',
+        'block_length': 4,
+        'n_bootstraps': 20,
+        'random_state': 4,
+    }
+    pandas_result = partial_temporal_association_summary_table(
+        partial_temporal_data_pandas,
+        **kwargs,
+    )
+    polars_result = partial_temporal_association_summary_table(
+        pl.from_pandas(partial_temporal_data_pandas),
+        **kwargs,
+    )
+
+    assert isinstance(polars_result, pl.DataFrame)
+    assert polars_result['association'].to_list() == pytest.approx(
+        pandas_result['association'].tolist(),
+    )
+    assert polars_result['p_value'].to_list() == pytest.approx(
+        pandas_result['p_value'].tolist(),
+    )
+
+
+def test_partial_temporal_summary_rejects_covariate_as_feature(
+        partial_temporal_data_pandas,
+):
+    """A controlled temporal summary should reject a covariate feature role."""
+    with pytest.raises(ValueError, match='must not contain covariate'):
+        partial_temporal_association_summary_table(
+            partial_temporal_data_pandas,
+            feature_list=['covariate_a'],
+            target='target',
+            covariates='covariate_a',
+            block_length=4,
+            n_bootstraps=20,
         )
