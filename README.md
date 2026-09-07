@@ -1,5 +1,9 @@
 # alpha-research
 
+[![PyPI version](https://img.shields.io/pypi/v/alpha-research)](https://pypi.org/project/alpha-research/)
+[![Python versions](https://img.shields.io/pypi/pyversions/alpha-research)](https://pypi.org/project/alpha-research/)
+[![License](https://img.shields.io/pypi/l/alpha-research)](https://github.com/mvm-sylverio/alpha-research/blob/main/LICENSE)
+
 `alpha-research` is a reusable Python library for quantitative signal research.
 It provides feature and target construction, cross-sectional IC analysis,
 single-asset temporal association diagnostics, and dependency-aware bootstrap
@@ -37,13 +41,21 @@ input DataFrame backend whenever practical.
 Install the library and its core dependencies:
 
 ```bash
-pip install -e .
+pip install alpha-research
 ```
+
+Requires Python 3.11 or later.
 
 Install Matplotlib support when using plotting functions:
 
 ```bash
-pip install -e ".[viz]"
+pip install "alpha-research[viz]"
+```
+
+Install MetaTrader 5 support for OHLCV data ingestion:
+
+```bash
+pip install "alpha-research[mt5]"
 ```
 
 ## Cross-sectional IC
@@ -294,3 +306,7 @@ architectural boundaries.
 - *Active Portfolio Management* — Grinold & Kahn
 - *Advances in Financial Machine Learning* — Marcos López de Prado
 - *Machine Learning for Asset Managers* — Marcos López de Prado
+
+## License
+
+This project is licensed under the BSD 3-Clause License. See [LICENSE](LICENSE).
