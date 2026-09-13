@@ -1,7 +1,7 @@
-import pytest
+import numpy as np
 import pandas as pd
 import polars as pl
-import numpy as np
+import pytest
 
 # Imports that should not be inspected
 # noinspection PyProtectedMember
@@ -10,11 +10,13 @@ from alpha_research._utils import (
     _is_constant_series,
     _select_columns,
     _validate_df,
+    _validate_finite_number,
     _validate_positive_integer,
     _validate_same_backend,
     _validate_time_order,
     _validate_unique_keys,
 )
+
 
 # ------------------------------------------------------
 # fixtures
@@ -448,3 +450,26 @@ def test_validate_positive_integer_rejects_invalid_values(value):
     """Should reject non-positive, boolean, and noninteger values."""
     with pytest.raises(ValueError, match='value must be a positive integer'):
         _validate_positive_integer(value, 'value')
+
+
+# ------------------------------------------------------
+# _validate_finite_number
+# ------------------------------------------------------
+@pytest.mark.parametrize('value', [0, -1, 1.5, np.int64(2), np.float64(2.5)])
+def test_validate_finite_number_accepts_real_finite_values(value):
+    """Should normalize Python and NumPy finite real numbers to float."""
+    assert _validate_finite_number(value, 'value') == float(value)
+
+
+@pytest.mark.parametrize('value', [True, '1', None, 1 + 2j])
+def test_validate_finite_number_rejects_non_real_values(value):
+    """Should reject booleans and values outside the real-number contract."""
+    with pytest.raises(TypeError, match='value must be numeric'):
+        _validate_finite_number(value, 'value')
+
+
+@pytest.mark.parametrize('value', [np.nan, np.inf, -np.inf])
+def test_validate_finite_number_rejects_non_finite_values(value):
+    """Should reject NaN and both infinity signs."""
+    with pytest.raises(ValueError, match='value must be finite'):
+        _validate_finite_number(value, 'value')
