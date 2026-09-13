@@ -1,18 +1,27 @@
-import pytest
+import numpy as np
 import pandas as pd
 import polars as pl
-import numpy as np
+import pytest
 
 from alpha_research.features.transformations import (
     _normalize_feature_cols,
+    _validate_elementwise_features,
     _validate_temporal_order_by_symbol,
+    absolute,
+    clip,
     cross_sectional_quantile_rank,
     cross_sectional_rank,
     cross_sectional_zscore,
+    log1p,
+    power,
     rolling_quantile_rank,
     rolling_rank,
     rolling_zscore,
+    sign,
+    signed_log1p,
+    signed_power,
 )
+
 
 # ------------------------------------------------------
 # fixtures
@@ -415,3 +424,270 @@ def test_rolling_transformations_match_polars(
         polars_result[output_col].to_numpy(),
         equal_nan=True,
     )
+
+
+# ------------------------------------------------------
+# elementwise transformations
+# ------------------------------------------------------
+@pytest.fixture
+def elementwise_features_pandas():
+    """Create finite signed features with one missing observation."""
+    return pd.DataFrame({
+        'time': [1, 2, 3, 4],
+        'symbol': ['A'] * 4,
+        'x': [-4.0, -1.0, 0.0, np.nan],
+        'y': [1.0, 4.0, 9.0, 16.0],
+    })
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_elementwise_transformations_compute_expected_values(
+        elementwise_features_pandas,
+        backend,
+):
+    """Should compute the generic pointwise transformations in both backends."""
+    frame = (
+        elementwise_features_pandas
+        if backend == 'pandas'
+        else pl.from_pandas(elementwise_features_pandas)
+    )
+    expected = {
+        'x_sign': [-1.0, -1.0, 0.0, np.nan],
+        'x_abs': [4.0, 1.0, 0.0, np.nan],
+        'x_power_2': [16.0, 1.0, 0.0, np.nan],
+        'x_signed_power_0.5': [-2.0, -1.0, 0.0, np.nan],
+        'x_signed_log1p': [-np.log(5.0), -np.log(2.0), 0.0, np.nan],
+        'x_clip_-2_1': [-2.0, -1.0, 0.0, np.nan],
+    }
+    results = [
+        sign(frame, 'x'),
+        absolute(frame, 'x'),
+        power(frame, 'x', 2),
+        signed_power(frame, 'x', 0.5),
+        signed_log1p(frame, 'x'),
+        clip(frame, 'x', lower=-2, upper=1),
+    ]
+    for result, (column, values) in zip(results, expected.items(), strict=True):
+        np.testing.assert_allclose(
+            result[column].to_numpy(),
+            values,
+            equal_nan=True,
+        )
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_log1p_computes_expected_values_and_preserves_input(
+        elementwise_features_pandas,
+        backend,
+):
+    """Should append log1p values without mutating or dropping source columns."""
+    source = elementwise_features_pandas[['time', 'symbol', 'y']].copy()
+    frame = source if backend == 'pandas' else pl.from_pandas(source)
+    result = log1p(frame, 'y')
+
+    np.testing.assert_allclose(
+        result['y_log1p'].to_numpy(),
+        np.log1p(source['y'].to_numpy()),
+    )
+    assert list(result.columns[:3]) == list(source.columns)
+    assert 'y_log1p' not in frame.columns
+
+
+def test_elementwise_transformations_support_multiple_features(
+        elementwise_features_pandas,
+):
+    """Should append one independently transformed column per requested feature."""
+    result = absolute(elementwise_features_pandas, ['x', 'y'])
+    assert {'x_abs', 'y_abs'} <= set(result.columns)
+
+
+@pytest.mark.parametrize(
+    'frame, features, error_type, message',
+    [
+        (pd.DataFrame({'x': [1.0]}), [], ValueError, 'empty'),
+        (pd.DataFrame({'x': [1.0]}), 'missing', KeyError, 'missing required'),
+        (pd.DataFrame({'x': ['a']}), 'x', ValueError, 'numeric'),
+        (pd.DataFrame({'x': [np.inf]}), 'x', ValueError, 'finite'),
+        (pd.DataFrame({'x': [np.nan]}), 'x', ValueError, 'missing all'),
+    ],
+)
+def test_validate_elementwise_features_rejects_invalid_inputs(
+        frame,
+        features,
+        error_type,
+        message,
+):
+    """Should enforce the direct helper contract for pointwise inputs."""
+    with pytest.raises(error_type, match=message):
+        _validate_elementwise_features(frame, features)
+
+
+def test_validate_elementwise_features_returns_normalized_names():
+    """Should normalize a valid single feature into a list."""
+    assert _validate_elementwise_features(pd.DataFrame({'x': [1.0]}), 'x') == ['x']
+
+
+@pytest.mark.parametrize(
+    'function, kwargs, message',
+    [
+        (power, {'exponent': 0.5}, 'fractional exponent'),
+        (power, {'exponent': -1}, 'non-zero'),
+        (signed_power, {'exponent': -1}, 'non-zero'),
+        (log1p, {}, 'greater than -1'),
+    ],
+)
+def test_elementwise_transformations_validate_real_domains(function, kwargs, message):
+    """Should reject values outside each real-valued transform domain."""
+    frame = pd.DataFrame({'x': [-2.0, 0.0, 1.0]})
+    with pytest.raises(ValueError, match=message):
+        function(frame, 'x', **kwargs)
+
+
+@pytest.mark.parametrize(
+    'kwargs, error_type, message',
+    [
+        ({}, ValueError, 'at least one'),
+        ({'lower': 2, 'upper': 1}, ValueError, 'must not exceed'),
+        ({'lower': True}, TypeError, 'numeric'),
+        ({'upper': np.inf}, ValueError, 'finite'),
+    ],
+)
+def test_clip_validates_bounds(kwargs, error_type, message):
+    """Should require ordered finite clipping bounds."""
+    with pytest.raises(error_type, match=message):
+        clip(pd.DataFrame({'x': [1.0]}), 'x', **kwargs)
+
+
+@pytest.mark.parametrize(
+    'features, error_type, message',
+    [
+        (['x', 'x'], ValueError, 'duplicate'),
+        (['x', ''], TypeError, 'non-empty'),
+        (['x', 1], TypeError, 'non-empty'),
+    ],
+)
+def test_elementwise_transformations_reject_ambiguous_feature_names(
+        elementwise_features_pandas,
+        features,
+        error_type,
+        message,
+):
+    """Should reject malformed or duplicate batch feature specifications."""
+    with pytest.raises(error_type, match=message):
+        absolute(elementwise_features_pandas, features)
+
+
+@pytest.mark.parametrize(
+    'values',
+    [
+        [True, False],
+        [1 + 2j, 2 + 3j],
+    ],
+)
+def test_elementwise_transformations_reject_non_real_numeric_columns(values):
+    """Should reject boolean and complex inputs rather than diverging by backend."""
+    with pytest.raises(ValueError, match='real numeric'):
+        absolute(pd.DataFrame({'x': values}), 'x')
+
+
+def test_elementwise_transformations_reject_duplicate_dataframe_columns():
+    """Should fail explicitly before ambiguous Pandas column selection."""
+    frame = pd.DataFrame([[1.0, 2.0]], columns=['x', 'x'])
+    with pytest.raises(ValueError, match='duplicate column'):
+        absolute(frame, 'x')
+
+
+@pytest.mark.parametrize(
+    'frame, message',
+    [
+        (pl.DataFrame({'x': [True, False]}), 'numeric'),
+        (pl.DataFrame({'x': [1.0, np.inf]}), 'finite'),
+        (pl.DataFrame({'x': [None, None]}, schema={'x': pl.Float64}), 'missing all'),
+    ],
+)
+def test_elementwise_transformations_validate_invalid_polars_features(
+        frame,
+        message,
+):
+    """Should enforce type, finiteness, and missingness in native Polars data."""
+    with pytest.raises(ValueError, match=message):
+        absolute(frame, 'x')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_elementwise_transformations_preserve_row_order_and_pandas_index(
+        elementwise_features_pandas,
+        backend,
+):
+    """Should remain pointwise when rows arrive in a non-temporal order."""
+    shuffled = elementwise_features_pandas.iloc[[2, 0, 3, 1]].copy()
+    frame = shuffled if backend == 'pandas' else pl.from_pandas(shuffled)
+    result = signed_log1p(frame, 'x')
+
+    np.testing.assert_allclose(
+        result['x_signed_log1p'].to_numpy(),
+        np.sign(shuffled['x']) * np.log1p(shuffled['x'].abs()),
+        equal_nan=True,
+    )
+    if backend == 'pandas':
+        assert result.index.tolist() == shuffled.index.tolist()
+
+
+def test_batch_elementwise_transformation_matches_independent_calls(
+        elementwise_features_pandas,
+):
+    """Should make batch execution semantically identical to separate calls."""
+    batch = signed_power(elementwise_features_pandas, ['x', 'y'], exponent=2)
+    x_only = signed_power(elementwise_features_pandas, 'x', exponent=2)
+    y_only = signed_power(elementwise_features_pandas, 'y', exponent=2)
+
+    pd.testing.assert_series_equal(
+        batch['x_signed_power_2'],
+        x_only['x_signed_power_2'],
+    )
+    pd.testing.assert_series_equal(
+        batch['y_signed_power_2'],
+        y_only['y_signed_power_2'],
+    )
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_power_identity_and_zero_exponents_cover_boundary_values(backend):
+    """Should define finite values raised to one and zero consistently."""
+    pandas_frame = pd.DataFrame({'x': [-2.0, 0.0, 3.0, np.nan]})
+    frame = pandas_frame if backend == 'pandas' else pl.from_pandas(pandas_frame)
+
+    identity = power(frame, 'x', exponent=1)
+    zero = power(frame, 'x', exponent=0)
+    np.testing.assert_allclose(
+        identity['x_power_1'].to_numpy(),
+        [-2.0, 0.0, 3.0, np.nan],
+        equal_nan=True,
+    )
+    np.testing.assert_allclose(
+        zero['x_power_0'].to_numpy(),
+        [1.0, 1.0, 1.0, np.nan],
+        equal_nan=True,
+    )
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_clip_supports_each_one_sided_boundary(backend):
+    """Should support lower-only and upper-only clipping in both backends."""
+    pandas_frame = pd.DataFrame({'x': [-2.0, 0.0, 3.0]})
+    frame = pandas_frame if backend == 'pandas' else pl.from_pandas(pandas_frame)
+
+    lower = clip(frame, 'x', lower=0)
+    upper = clip(frame, 'x', upper=1)
+    np.testing.assert_allclose(lower['x_clip_0_None'].to_numpy(), [0.0, 0.0, 3.0])
+    np.testing.assert_allclose(upper['x_clip_None_1'].to_numpy(), [-2.0, 0.0, 1.0])
+
+
+def test_signed_transformations_preserve_odd_symmetry():
+    """Should produce opposite outputs for equal positive and negative magnitudes."""
+    frame = pd.DataFrame({'x': [-4.0, 4.0]})
+    powered = signed_power(frame, 'x', exponent=0.5)['x_signed_power_0.5']
+    logged = signed_log1p(frame, 'x')['x_signed_log1p']
+
+    assert powered.iloc[0] == -powered.iloc[1]
+    assert logged.iloc[0] == -logged.iloc[1]
