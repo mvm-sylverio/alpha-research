@@ -3,6 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/alpha-research)](https://pypi.org/project/alpha-research/)
 [![Python versions](https://img.shields.io/pypi/pyversions/alpha-research)](https://pypi.org/project/alpha-research/)
 [![License](https://img.shields.io/pypi/l/alpha-research)](https://github.com/mvm-sylverio/alpha-research/blob/main/LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/mvm-sylverio/alpha-research)](https://github.com/mvm-sylverio/alpha-research/commits/main)
 
 `alpha-research` is a reusable Python library for quantitative signal research.
 It provides feature and target construction, cross-sectional IC analysis,
