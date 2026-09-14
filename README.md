@@ -18,9 +18,12 @@ input DataFrame backend whenever practical.
 - Feature and target utilities: simple/log returns, forward returns, OHLC
   Triple-Barrier labels, trend features, volatility measures including realized
   volatility and ATR, and ADX.
-- Feature transformations: cross-sectional rank, z-score, and rank-based
-  quantile groups; trailing per-asset rank, z-score, and rank-based quantile
-  groups.
+- Feature transformations: generic sign, absolute, power, signed-power,
+  log1p, signed-log1p, and fixed clipping; cross-sectional rank, z-score, and
+  rank-based quantile groups; trailing per-asset rank, z-score, and rank-based
+  quantile groups.
+- Aligned feature interactions: ratio, product, directional difference, and
+  fixed-threshold conditional features.
 - Research data utilities: feature/target schema helpers and purged
   train/test splitting.
 - Cross-sectional information coefficient analysis with Pearson or Spearman
@@ -29,6 +32,8 @@ input DataFrame backend whenever practical.
   diagnostics, partial association, decay analysis, bootstrap directional
   stability and FDR correction.
 - Rolling temporal association with percentile bootstrap bands.
+- Descriptive feature-target relationship diagnostics with pooled or grouped
+  quantile/equal-width bins and raw/binned visualizations.
 - Visualization utilities for ranked IC and temporal-association summaries,
   partial summaries with visible covariates, decay curves, rolling temporal
   association, time-series feature values, and cross-sectional feature summaries.

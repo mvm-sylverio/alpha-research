@@ -37,6 +37,7 @@ mt5 = ["MetaTrader5>=5.0.0"]
 viz = ["matplotlib>=3.8.0"]
 dev = [
     "pytest>=7.0.0",
+    "ruff>=0.16.0"
 ]
 
 [tool.setuptools.packages.find]
