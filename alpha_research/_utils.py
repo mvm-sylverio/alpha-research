@@ -1,6 +1,9 @@
+import math
+from numbers import Real
+
+import numpy as np
 import pandas as pd
 import polars as pl
-import numpy as np
 
 
 def _validate_df_type(df: pd.DataFrame | pl.DataFrame):
@@ -341,3 +344,33 @@ def _validate_positive_integer(value: int, name: str) -> None:
     """
     if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value <= 0:
         raise ValueError(f'{name} must be a positive integer.')
+
+
+def _validate_finite_number(value: Real, name: str) -> float:
+    """Return one validated finite real-valued parameter.
+
+    Parameters
+    ----------
+    value : numbers.Real
+        Candidate numeric value.
+    name : str
+        Parameter name used in validation errors.
+
+    Returns
+    -------
+    float
+        Finite value converted to float.
+
+    Raises
+    ------
+    TypeError
+        If value is not a real number or is a boolean.
+    ValueError
+        If value is NaN or infinite.
+    """
+    if not isinstance(value, Real) or isinstance(value, bool):
+        raise TypeError(f'{name} must be numeric.')
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise ValueError(f'{name} must be finite.')
+    return normalized
