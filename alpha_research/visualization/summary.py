@@ -713,6 +713,8 @@ def plot_temporal_association_summary(
     ax.set_ylabel('Feature')
     if title is not None:
         ax.set_title(title)
+    if ax.get_legend() is not None:
+        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
     if created_axis:
         ax.figure.tight_layout()
 
