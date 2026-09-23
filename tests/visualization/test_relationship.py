@@ -5,7 +5,10 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from alpha_research.evaluation import feature_target_relationship
+from alpha_research.evaluation import (
+    feature_target_relationship,
+    temporal_feature_target_relationship_uncertainty,
+)
 from alpha_research.visualization import (
     plot_feature_target_bins,
     plot_feature_target_scatter,
@@ -225,3 +228,95 @@ def test_plot_feature_target_bins_supports_polars_summary(
 
     assert len(axis.lines[0].get_xdata()) == 4
     plt.close(figure)
+
+
+def test_plot_feature_target_bins_draws_mbb_intervals_and_counts():
+    """Should add pointwise uncertainty bars and observed bin counts."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    feature = np.linspace(-2.0, 2.0, 40)
+    frame = pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=40, freq='D'),
+        'symbol': ['A'] * 40,
+        'feature': feature,
+        'target': feature ** 2,
+    })
+    uncertainty = temporal_feature_target_relationship_uncertainty(
+        frame,
+        feature='feature',
+        target='target',
+        block_length=5,
+        n_bootstraps=10,
+        n_bins=4,
+        random_state=5,
+    )
+    figure, axis = plt.subplots()
+
+    plot_feature_target_bins(
+        uncertainty.relationship,
+        ax=axis,
+        uncertainty=uncertainty,
+        show_counts=True,
+    )
+
+    assert len(axis.collections) == 1
+    assert [text.get_text() for text in axis.texts] == ['n=10'] * 4
+    plt.close(figure)
+
+
+def test_plot_feature_target_bins_rejects_mismatched_uncertainty(
+        relationship_result_pandas,
+):
+    """Should prevent intervals from a different relationship being plotted."""
+    frame = relationship_result_pandas.pairs.drop(columns='bin').copy()
+    frame['other_target'] = frame['target'] * -1
+    uncertainty = temporal_feature_target_relationship_uncertainty(
+        frame,
+        feature='feature',
+        target='other_target',
+        block_length=2,
+        n_bootstraps=5,
+        n_bins=4,
+        random_state=2,
+    )
+
+    with pytest.raises(ValueError, match='plotted relationship'):
+        plot_feature_target_bins(
+            relationship_result_pandas,
+            uncertainty=uncertainty,
+        )
+
+
+def test_plot_feature_target_bins_rejects_same_schema_from_another_sample(
+        relationship_result_pandas,
+):
+    """Should not attach intervals from an unrelated same-named sample."""
+    frame = relationship_result_pandas.pairs.drop(columns='bin').copy()
+    uncertainty = temporal_feature_target_relationship_uncertainty(
+        frame.assign(target=frame['target'] * 2),
+        feature='feature',
+        target='target',
+        block_length=2,
+        n_bootstraps=5,
+        n_bins=4,
+        random_state=3,
+    )
+
+    with pytest.raises(ValueError, match='plotted relationship'):
+        plot_feature_target_bins(
+            relationship_result_pandas,
+            uncertainty=uncertainty,
+        )
+
+
+def test_plot_feature_target_bins_validates_show_counts(
+        relationship_result_pandas,
+):
+    """Should require an explicit boolean for count annotations."""
+    with pytest.raises(TypeError, match='show_counts'):
+        plot_feature_target_bins(
+            relationship_result_pandas,
+            show_counts=1,
+        )
