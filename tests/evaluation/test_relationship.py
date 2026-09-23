@@ -53,6 +53,28 @@ def test_feature_target_relationship_returns_pooled_quantile_summary(
     assert summary['n_groups'].tolist() == [1, 1, 1, 1]
 
 
+def test_summarize_relationship_pairs_assigns_bins_without_key_validation():
+    """The shared estimator should support repeated bootstrap observations."""
+    pairs = pd.DataFrame({
+        'feature': [1.0, 1.0, 2.0, 3.0],
+        'target': [2.0, 2.0, 4.0, 6.0],
+    })
+
+    binned, summary, groups, n_unassigned = _summarize_relationship_pairs(
+        pairs,
+        feature='feature',
+        target='target',
+        n_bins=2,
+        binning='quantile',
+        group_col=None,
+    )
+
+    assert binned['bin'].notna().all()
+    assert summary['n_obs'].sum() == len(pairs)
+    assert groups is None
+    assert n_unassigned == 0
+
+
 @pytest.mark.parametrize('backend', ['pandas', 'polars'])
 def test_feature_target_relationship_groups_cross_sectionally(
         relationship_frame_pandas,

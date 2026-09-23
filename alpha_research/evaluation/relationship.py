@@ -70,6 +70,128 @@ class FeatureTargetRelationshipResult:
     n_unassigned: int
 
 
+
+def _summarize_relationship_pairs(
+        pairs: pd.DataFrame,
+        feature: str,
+        target: str,
+        n_bins: int,
+        binning: Literal['quantile', 'equal_width'],
+        group_col: str | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, int]:
+    """Assign feature bins and summarize target values without key validation.
+
+    Parameters
+    ----------
+    pairs : pd.DataFrame
+        Finite feature-target observations already validated by the caller.
+    feature, target : str
+        Numeric feature and target columns.
+    n_bins : int
+        Positive requested number of feature bins.
+    binning : {'quantile', 'equal_width'}
+        Feature-only binning rule.
+    group_col : str | None
+        Optional column within which bins are rebuilt independently.
+
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, int]
+        Binned pairs, aggregate bin summary, optional group summary, and the
+        number of pairs that could not receive a bin.
+
+    Raises
+    ------
+    ValueError
+        If no observation can receive a feature bin.
+
+    Notes
+    -----
+    This internal estimator is shared by the observed relationship and each
+    temporal bootstrap replicate. Bootstrap samples can repeat source keys,
+    so observation-key validation deliberately remains in the public entry
+    points rather than in this helper.
+    """
+    pairs = pairs.copy()
+    pairs['bin'] = np.nan
+    grouped_indices = (
+        [(None, pairs.index)]
+        if group_col is None
+        else list(pairs.groupby(group_col, sort=False, dropna=False).groups.items())
+    )
+    for _, indices in grouped_indices:
+        values = pairs.loc[indices, feature]
+        if len(values) < n_bins:
+            continue
+        if binning == 'quantile':
+            ranks = values.rank(method='average')
+            assignments = np.ceil(ranks * n_bins / len(values))
+        else:
+            minimum = values.min()
+            maximum = values.max()
+            if minimum == maximum:
+                continue
+            assignments = np.floor(
+                (values - minimum) / (maximum - minimum) * n_bins,
+            ) + 1
+            assignments = assignments.clip(lower=1, upper=n_bins)
+        pairs.loc[indices, 'bin'] = assignments
+
+    n_unassigned = int(pairs['bin'].isna().sum())
+    assigned = pairs.dropna(subset=['bin']).copy()
+    if assigned.empty:
+        raise ValueError('no finite feature-target pairs could receive a bin.')
+    pairs['bin'] = pairs['bin'].astype('Int64')
+    assigned['bin'] = assigned['bin'].astype(int)
+
+    aggregation = {
+        feature: ['mean', 'median', 'min', 'max'],
+        target: ['mean', 'median', 'size'],
+    }
+    if group_col is None:
+        bin_summary = assigned.groupby('bin', sort=True).agg(aggregation)
+        bin_summary.columns = [
+            'feature_mean',
+            'feature_median',
+            'feature_min',
+            'feature_max',
+            'target_mean',
+            'target_median',
+            'n_obs',
+        ]
+        bin_summary = bin_summary.reset_index()
+        bin_summary['n_groups'] = 1
+        group_summary = None
+    else:
+        group_summary = assigned.groupby(
+            [group_col, 'bin'],
+            sort=True,
+            dropna=False,
+        ).agg(aggregation)
+        group_summary.columns = [
+            'feature_mean',
+            'feature_median',
+            'feature_min',
+            'feature_max',
+            'target_mean',
+            'target_median',
+            'n_obs',
+        ]
+        group_summary = group_summary.reset_index()
+        bin_summary = group_summary.groupby('bin', sort=True).agg(
+            feature_mean=('feature_mean', 'mean'),
+            feature_median=('feature_median', 'median'),
+            feature_min=('feature_min', 'min'),
+            feature_max=('feature_max', 'max'),
+            target_mean=('target_mean', 'mean'),
+            target_median=('target_median', 'median'),
+            n_obs=('n_obs', 'sum'),
+            n_groups=(group_col, 'size'),
+        ).reset_index()
+
+    return pairs, bin_summary, group_summary, n_unassigned
+
+
 def feature_target_relationship(
         df: pd.DataFrame | pl.DataFrame,
         feature: str,
@@ -247,81 +369,16 @@ def feature_target_relationship(
     if n_valid < n_bins:
         raise ValueError('at least n_bins finite feature-target pairs are required.')
 
-    pairs['bin'] = np.nan
-    grouped_indices = (
-        [(None, pairs.index)]
-        if group_col is None
-        else list(pairs.groupby(group_col, sort=False, dropna=False).groups.items())
+    pairs, bin_summary, group_summary, n_unassigned = (
+        _summarize_relationship_pairs(
+            pairs,
+            feature,
+            target,
+            n_bins,
+            binning,
+            group_col,
+        )
     )
-    for _, indices in grouped_indices:
-        values = pairs.loc[indices, feature]
-        if len(values) < n_bins:
-            continue
-        if binning == 'quantile':
-            ranks = values.rank(method='average')
-            assignments = np.ceil(ranks * n_bins / len(values))
-        else:
-            minimum = values.min()
-            maximum = values.max()
-            if minimum == maximum:
-                continue
-            assignments = np.floor(
-                (values - minimum) / (maximum - minimum) * n_bins,
-            ) + 1
-            assignments = assignments.clip(lower=1, upper=n_bins)
-        pairs.loc[indices, 'bin'] = assignments
-
-    n_unassigned = int(pairs['bin'].isna().sum())
-    assigned = pairs.dropna(subset=['bin']).copy()
-    if assigned.empty:
-        raise ValueError('no finite feature-target pairs could receive a bin.')
-    pairs['bin'] = pairs['bin'].astype('Int64')
-    assigned['bin'] = assigned['bin'].astype(int)
-
-    aggregation = {
-        feature: ['mean', 'median', 'min', 'max'],
-        target: ['mean', 'median', 'size'],
-    }
-    if group_col is None:
-        bin_summary = assigned.groupby('bin', sort=True).agg(aggregation)
-        bin_summary.columns = [
-            'feature_mean',
-            'feature_median',
-            'feature_min',
-            'feature_max',
-            'target_mean',
-            'target_median',
-            'n_obs',
-        ]
-        bin_summary = bin_summary.reset_index()
-        bin_summary['n_groups'] = 1
-        group_summary = None
-    else:
-        group_summary = assigned.groupby(
-            [group_col, 'bin'],
-            sort=True,
-            dropna=False,
-        ).agg(aggregation)
-        group_summary.columns = [
-            'feature_mean',
-            'feature_median',
-            'feature_min',
-            'feature_max',
-            'target_mean',
-            'target_median',
-            'n_obs',
-        ]
-        group_summary = group_summary.reset_index()
-        bin_summary = group_summary.groupby('bin', sort=True).agg(
-            feature_mean=('feature_mean', 'mean'),
-            feature_median=('feature_median', 'median'),
-            feature_min=('feature_min', 'min'),
-            feature_max=('feature_max', 'max'),
-            target_mean=('target_mean', 'mean'),
-            target_median=('target_median', 'median'),
-            n_obs=('n_obs', 'sum'),
-            n_groups=(group_col, 'size'),
-        ).reset_index()
 
     if isinstance(df, pl.DataFrame):
         output_pairs = pl.from_pandas(pairs)
