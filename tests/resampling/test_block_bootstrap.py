@@ -175,6 +175,39 @@ def test_generate_moving_blocks_is_deterministic_for_same_input(series_pandas):
     assert [block.to_list() for block in first] == [block.to_list() for block in second]
 
 
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_generate_moving_blocks_respects_original_continuity(backend):
+    """Candidate blocks must not join observations separated before filtering."""
+    values = [1, 2, 3, 4, 5, 6]
+    data = pd.Series(values) if backend == 'pandas' else pl.Series(values)
+
+    blocks = generate_moving_blocks(
+        data, block_length=2, continuity=[0, 1, 4, 5, 6, 9],
+    )
+
+    assert [block.to_list() for block in blocks] == [[1, 2], [3, 4], [4, 5]]
+
+
+@pytest.mark.parametrize(
+    'continuity, error, message',
+    [
+        ([0, 1], ValueError, 'match'),
+        ([0, 1, 1, 3, 4, 5, 6], ValueError, 'strictly increasing'),
+        ([0, 2, 4, 6, 8, 10, 12], ValueError, 'no contiguous'),
+        ([0, 1, 2, True, 4, 5, 6], TypeError, 'integer'),
+        ('0,1,2,3,4,5,6', TypeError, 'sequence'),
+    ],
+)
+def test_generate_moving_blocks_validates_continuity(
+        series_pandas, continuity, error, message,
+):
+    """Malformed positions or too-short runs must fail explicitly."""
+    with pytest.raises(error, match=message):
+        generate_moving_blocks(
+            series_pandas, block_length=2, continuity=continuity,
+        )
+
+
 @pytest.mark.parametrize('block_length', [0, -1, 8])
 def test_generate_moving_blocks_rejects_invalid_block_length(series_pandas, block_length):
     """Should reject non-positive or oversized block lengths."""

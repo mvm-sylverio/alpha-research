@@ -741,6 +741,7 @@ def temporal_association_summary_table(
         time_col: str = 'time',
         symbol_col: str = 'symbol',
         feature_groups: dict[str, str] | None = None,
+        continuity_col: str | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize bootstrap temporal-association diagnostics for one or more features.
@@ -777,6 +778,9 @@ def temporal_association_summary_table(
         Single-asset identifier column.
     feature_groups : dict[str, str] | None, default None
         Optional semantic group mapping. Missing features receive 'ungrouped'.
+    continuity_col : str | None, default None
+        Original integer observation positions. When supplied, MBB candidate
+        blocks cannot cross gaps caused by prior filtering or missing values.
 
     Returns
     -------
@@ -829,8 +833,17 @@ def temporal_association_summary_table(
             time_col=time_col,
             symbol_col=symbol_col,
         )
-        valid_pairs = _select_valid_temporal_pairs(df, feature, target)
-        blocks = generate_moving_blocks(valid_pairs, block_length, step)
+        valid_pairs = _select_valid_temporal_pairs(
+            df, feature, target,
+            [continuity_col] if continuity_col is not None else None,
+        )
+        continuity = (
+            valid_pairs[continuity_col]
+            if continuity_col is not None else None
+        )
+        blocks = generate_moving_blocks(
+            valid_pairs, block_length, step, continuity=continuity,
+        )
         bootstrap_samples = moving_block_bootstrap(
             blocks,
             sample_size=len(valid_pairs),
@@ -897,6 +910,7 @@ def partial_temporal_association_summary_table(
         symbol_col: str = 'symbol',
         feature_groups: dict[str, str] | None = None,
         min_n: int | None = None,
+        continuity_col: str | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize controlled temporal associations for one or more features.
@@ -936,6 +950,9 @@ def partial_temporal_association_summary_table(
     min_n : int | None, default None
         Optional additional complete-observation threshold for every observed
         and bootstrap partial association.
+    continuity_col : str | None, default None
+        Original integer observation positions. When supplied, MBB candidate
+        blocks cannot cross gaps caused by prior filtering or missing values.
 
     Returns
     -------
@@ -978,9 +995,15 @@ def partial_temporal_association_summary_table(
             df,
             feature,
             target,
-            normalized_covariates,
+            [*normalized_covariates, *([continuity_col] if continuity_col else [])],
         )
-        blocks = generate_moving_blocks(valid_observations, block_length, step)
+        continuity = (
+            valid_observations[continuity_col]
+            if continuity_col is not None else None
+        )
+        blocks = generate_moving_blocks(
+            valid_observations, block_length, step, continuity=continuity,
+        )
         bootstrap_samples = moving_block_bootstrap(
             blocks,
             sample_size=len(valid_observations),
