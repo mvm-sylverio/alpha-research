@@ -4,7 +4,10 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from alpha_research.evaluation.relationship import FeatureTargetRelationshipResult
+from alpha_research.evaluation.relationship import (
+    FeatureTargetRelationshipResult,
+    FeatureTargetRelationshipUncertaintyResult,
+)
 
 __all__ = [
     'plot_feature_target_bins',
@@ -120,6 +123,8 @@ def plot_feature_target_bins(
         ax: Any = None,
         color: str = 'C1',
         title: str | None = None,
+        uncertainty: FeatureTargetRelationshipUncertaintyResult | None = None,
+        show_counts: bool = False,
 ) -> Any:
     """Plot mean or median Y against representative values of binned X.
 
@@ -142,6 +147,10 @@ def plot_feature_target_bins(
         Matplotlib line and point color.
     title : str | None, default None
         Optional title. A descriptive default is used when omitted.
+    uncertainty : FeatureTargetRelationshipUncertaintyResult | None, default None
+        Optional temporal MBB result for pointwise vertical confidence bars.
+    show_counts : bool, default False
+        Whether to annotate each observed bin point with its ``n_obs`` count.
 
     Returns
     -------
@@ -153,7 +162,7 @@ def plot_feature_target_bins(
     ImportError
         If Matplotlib is not installed. Install the optional ``viz`` extra.
     TypeError
-        If result has an unsupported type.
+        If result, uncertainty, or show_counts has an unsupported type.
     ValueError
         If a statistic name is invalid.
 
@@ -170,6 +179,18 @@ def plot_feature_target_bins(
         raise ValueError("target_statistic must be 'mean' or 'median'.")
     if feature_statistic not in {'mean', 'median'}:
         raise ValueError("feature_statistic must be 'mean' or 'median'.")
+    if uncertainty is not None:
+        if not isinstance(
+                uncertainty,
+                FeatureTargetRelationshipUncertaintyResult,
+        ):
+            raise TypeError(
+                'uncertainty must be a FeatureTargetRelationshipUncertaintyResult or None.',
+            )
+        if uncertainty.relationship is not result:
+            raise ValueError('uncertainty must describe the plotted relationship.')
+    if not isinstance(show_counts, bool):
+        raise TypeError('show_counts must be a boolean.')
 
     try:
         import matplotlib.pyplot as plt
@@ -193,6 +214,40 @@ def plot_feature_target_bins(
         color=color,
         marker='o',
     )
+    if uncertainty is not None:
+        uncertainty_frame = (
+            uncertainty.bin_uncertainty.copy()
+            if isinstance(uncertainty.bin_uncertainty, pd.DataFrame)
+            else uncertainty.bin_uncertainty.to_pandas()
+        )
+        plotted = summary.merge(
+            uncertainty_frame,
+            on='bin',
+            how='left',
+            validate='1:1',
+        )
+        lower = plotted[f'target_{target_statistic}_ci_lower'].to_numpy(dtype=float)
+        upper = plotted[f'target_{target_statistic}_ci_upper'].to_numpy(dtype=float)
+        x_values = plotted[x_col].to_numpy(dtype=float)
+        finite = np.isfinite(lower) & np.isfinite(upper) & np.isfinite(x_values)
+        ax.vlines(
+            x_values[finite],
+            lower[finite],
+            upper[finite],
+            color=color,
+            linewidth=1.2,
+            alpha=0.85,
+        )
+    if show_counts:
+        for _, bin_row in summary.iterrows():
+            ax.annotate(
+                f"n={int(bin_row['n_obs'])}",
+                (float(bin_row[x_col]), float(bin_row[y_col])),
+                xytext=(0, 7),
+                textcoords='offset points',
+                ha='center',
+                fontsize=8,
+            )
     ax.axhline(0, color='0.6', linewidth=0.8, linestyle='--')
     ax.set_xlabel(f'{result.feature} bin {feature_statistic}')
     ax.set_ylabel(f'{result.target} bin {target_statistic}')

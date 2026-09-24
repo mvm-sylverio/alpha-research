@@ -904,6 +904,42 @@ def test_temporal_association_summary_table_single_feature(temporal_summary_df_p
     }
 
 
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_temporal_summary_does_not_bridge_filtered_time_gaps(
+        temporal_summary_df_pandas, backend,
+):
+    """An original-position gap must exclude every straddling MBB block."""
+    frame = temporal_summary_df_pandas.copy()
+    frame['original_position'] = np.arange(len(frame)) * 2
+    data = frame if backend == 'pandas' else pl.from_pandas(frame)
+
+    with pytest.raises(ValueError, match='no contiguous candidate block'):
+        temporal_association_summary_table(
+            data, feature_list=['feature_a'], target='target',
+            block_length=2, n_bootstraps=10,
+            continuity_col='original_position',
+        )
+
+
+def test_temporal_summary_continuity_preserves_full_sequence_results(
+        temporal_summary_df_pandas,
+):
+    """A complete sequence must retain the established MBB estimates."""
+    frame = temporal_summary_df_pandas.copy()
+    frame['original_position'] = np.arange(len(frame))
+    kwargs = {
+        'feature_list': ['feature_a'], 'target': 'target',
+        'block_length': 3, 'n_bootstraps': 20, 'random_state': 42,
+    }
+
+    original = temporal_association_summary_table(frame, **kwargs)
+    contiguous = temporal_association_summary_table(
+        frame, continuity_col='original_position', **kwargs,
+    )
+
+    pd.testing.assert_frame_equal(original, contiguous)
+
+
 def test_temporal_association_summary_table_multiple_features_and_groups(
         temporal_summary_df_pandas,
 ):
@@ -1593,6 +1629,43 @@ def test_partial_temporal_association_summary_table_returns_wald_results(
     assert np.isfinite(result['wald_ci_lower']).all()
     assert np.isfinite(result['wald_ci_upper']).all()
     assert result['n_bootstraps'].tolist() == [30, 30]
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_temporal_summary_does_not_bridge_filtered_time_gaps(
+        partial_temporal_data_pandas, backend,
+):
+    """Partial-MBB blocks must retain the original observation adjacency."""
+    frame = partial_temporal_data_pandas.copy()
+    frame['original_position'] = np.arange(len(frame)) * 2
+    data = frame if backend == 'pandas' else pl.from_pandas(frame)
+
+    with pytest.raises(ValueError, match='no contiguous candidate block'):
+        partial_temporal_association_summary_table(
+            data, feature_list=['feature'], target='target',
+            covariates='covariate_a', block_length=2, n_bootstraps=10,
+            continuity_col='original_position',
+        )
+
+
+def test_partial_temporal_summary_continuity_preserves_full_sequence_results(
+        partial_temporal_data_pandas,
+):
+    """A complete sequence must retain existing partial-MBB estimates."""
+    frame = partial_temporal_data_pandas.copy()
+    frame['original_position'] = np.arange(len(frame))
+    kwargs = {
+        'feature_list': ['feature'], 'target': 'target',
+        'covariates': 'covariate_a', 'block_length': 4,
+        'n_bootstraps': 20, 'random_state': 4,
+    }
+
+    original = partial_temporal_association_summary_table(frame, **kwargs)
+    contiguous = partial_temporal_association_summary_table(
+        frame, continuity_col='original_position', **kwargs,
+    )
+
+    pd.testing.assert_frame_equal(original, contiguous)
 
 
 def test_partial_temporal_association_summary_table_preserves_polars_backend(

@@ -46,6 +46,7 @@ def generate_moving_blocks(
         data: ResamplingData,
         block_length: int,
         step: int = 1,
+        continuity: Sequence[int] | None = None,
 ) -> list[ResamplingData]:
     """
     Generate contiguous candidate blocks for Moving Block Bootstrap.
@@ -60,6 +61,9 @@ def generate_moving_blocks(
     step : int, default 1
         Distance between consecutive block starts. A value of 1 generates the
         canonical moving blocks with maximum overlap.
+    continuity : Sequence[int] | None, default None
+        Strictly increasing original observation positions. When supplied,
+        candidate blocks cannot cross a gap in these positions.
 
     Returns
     -------
@@ -73,7 +77,9 @@ def generate_moving_blocks(
         If data is not a supported Series or DataFrame.
     ValueError
         If block_length or step is not a positive integer, or block_length is
-        greater than the number of observations.
+        greater than the number of observations, or no contiguous block fits.
+    TypeError
+        If continuity does not contain integer positions.
     """
     _validate_resampling_data(data)
     _validate_positive_integer(block_length, 'block_length')
@@ -87,11 +93,40 @@ def generate_moving_blocks(
             f'observations ({n_observations}).'
         )
 
+    if continuity is not None:
+        if isinstance(continuity, (str, bytes)) or not isinstance(
+                continuity, Sequence | np.ndarray | pd.Series | pl.Series
+        ):
+            raise TypeError('continuity must be a sequence of integer positions.')
+        positions = list(continuity)
+        if len(positions) != n_observations:
+            raise ValueError('continuity must match the number of observations.')
+        if any(
+                not isinstance(value, (int, np.integer)) or isinstance(value, bool)
+                for value in positions
+        ):
+            raise TypeError('continuity must contain only integer positions.')
+        if any(
+                positions[index] <= positions[index - 1]
+                for index in range(1, len(positions))
+        ):
+            raise ValueError('continuity positions must be strictly increasing.')
+
+    starts = range(0, n_observations - block_length + 1, step)
+    if continuity is not None:
+        starts = [
+            start for start in starts
+            if positions[start + block_length - 1] - positions[start]
+            == block_length - 1
+        ]
+        if not starts:
+            raise ValueError('no contiguous candidate block fits block_length.')
+
     return [
         data.iloc[start:start + block_length]
         if isinstance(data, (pd.Series, pd.DataFrame))
         else data.slice(start, block_length)
-        for start in range(0, n_observations - block_length + 1, step)
+        for start in starts
     ]
 
 

@@ -431,6 +431,8 @@ def test_plot_temporal_association_summary_draws_wald_intervals(
     assert axis.get_ylabel() == 'Feature'
     assert axis.get_title() == 'Temporal ranking'
     assert axis.get_legend().get_texts()[0].get_text() == 'Wald rejects null hypothesis'
+    figure.canvas.draw()
+    assert axis.get_legend().get_window_extent().x0 > axis.bbox.x1
     assert len(axis.containers) == 2
     assert any(line.get_linestyle() == '--' for line in axis.lines)
     plt.close(figure)
@@ -451,6 +453,24 @@ def test_plot_temporal_association_summary_prefers_fdr_decisions(
     plot_temporal_association_summary(corrected_table, ax=axis)
 
     assert axis.get_legend().get_texts()[0].get_text() == 'Passed FDR correction'
+    plt.close(figure)
+
+
+def test_plot_temporal_association_summary_fits_external_legend(
+        temporal_summary_table_pandas,
+):
+    """The standalone plot should keep its legend outside data and in frame."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    axis = plot_temporal_association_summary(temporal_summary_table_pandas)
+    figure = axis.figure
+    figure.canvas.draw()
+    legend_bounds = axis.get_legend().get_window_extent()
+
+    assert legend_bounds.x0 > axis.bbox.x1
+    assert legend_bounds.x1 <= figure.bbox.x1
     plt.close(figure)
 
 

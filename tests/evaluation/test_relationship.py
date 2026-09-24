@@ -5,8 +5,11 @@ import pytest
 
 from alpha_research.evaluation import (
     FeatureTargetRelationshipResult,
+    FeatureTargetRelationshipUncertaintyResult,
     feature_target_relationship,
+    temporal_feature_target_relationship_uncertainty,
 )
+from alpha_research.evaluation.relationship import _summarize_relationship_pairs
 
 
 @pytest.fixture
@@ -51,6 +54,28 @@ def test_feature_target_relationship_returns_pooled_quantile_summary(
     assert summary['bin'].tolist() == [1, 2, 3, 4]
     assert summary['n_obs'].tolist() == [2, 2, 2, 2]
     assert summary['n_groups'].tolist() == [1, 1, 1, 1]
+
+
+def test_summarize_relationship_pairs_assigns_bins_without_key_validation():
+    """The shared estimator should support repeated bootstrap observations."""
+    pairs = pd.DataFrame({
+        'feature': [1.0, 1.0, 2.0, 3.0],
+        'target': [2.0, 2.0, 4.0, 6.0],
+    })
+
+    binned, summary, groups, n_unassigned = _summarize_relationship_pairs(
+        pairs,
+        feature='feature',
+        target='target',
+        n_bins=2,
+        binning='quantile',
+        group_col=None,
+    )
+
+    assert binned['bin'].notna().all()
+    assert summary['n_obs'].sum() == len(pairs)
+    assert groups is None
+    assert n_unassigned == 0
 
 
 @pytest.mark.parametrize('backend', ['pandas', 'polars'])
@@ -510,3 +535,202 @@ def test_relationship_validates_boolean_polars_values(
     )
     with pytest.raises(ValueError, match='real numeric'):
         feature_target_relationship(frame, 'feature', 'target', n_bins=2)
+
+
+@pytest.fixture
+def temporal_relationship_frame_pandas():
+    """Create one ordered asset with a nonlinear feature-target structure."""
+    feature = np.linspace(-2.0, 2.0, 40)
+    return pd.DataFrame({
+        'time': pd.date_range('2024-01-01', periods=40, freq='D'),
+        'symbol': ['A'] * 40,
+        'feature': feature,
+        'target': feature ** 2,
+    })
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_temporal_relationship_uncertainty_returns_pointwise_mbb_intervals(
+        temporal_relationship_frame_pandas,
+        backend,
+):
+    """Should rebuild bins and summarize finite bootstrap estimates per bin."""
+    frame = (
+        temporal_relationship_frame_pandas
+        if backend == 'pandas'
+        else pl.from_pandas(temporal_relationship_frame_pandas)
+    )
+
+    result = temporal_feature_target_relationship_uncertainty(
+        frame,
+        feature='feature',
+        target='target',
+        block_length=5,
+        n_bootstraps=20,
+        n_bins=4,
+        random_state=17,
+    )
+    uncertainty = (
+        result.bin_uncertainty
+        if backend == 'pandas'
+        else result.bin_uncertainty.to_pandas()
+    )
+
+    assert isinstance(result, FeatureTargetRelationshipUncertaintyResult)
+    assert isinstance(result.relationship.pairs, type(frame))
+    assert isinstance(result.bin_uncertainty, type(frame))
+    assert uncertainty['bin'].tolist() == [1, 2, 3, 4]
+    assert uncertainty['n_bootstraps_effective'].tolist() == [20] * 4
+    assert uncertainty['status'].tolist() == ['ok'] * 4
+    assert (
+        uncertainty['target_mean_ci_lower']
+        <= uncertainty['target_mean_ci_upper']
+    ).all()
+    assert (
+        uncertainty['target_median_ci_lower']
+        <= uncertainty['target_median_ci_upper']
+    ).all()
+
+
+def test_temporal_relationship_uncertainty_is_seeded_and_does_not_mutate_input(
+        temporal_relationship_frame_pandas,
+):
+    """Should reproduce MBB intervals without changing caller-owned data."""
+    original = temporal_relationship_frame_pandas.copy(deep=True)
+    kwargs = {
+        'feature': 'feature',
+        'target': 'target',
+        'block_length': 4,
+        'n_bootstraps': 15,
+        'n_bins': 4,
+        'random_state': 29,
+    }
+
+    first = temporal_feature_target_relationship_uncertainty(
+        temporal_relationship_frame_pandas,
+        **kwargs,
+    )
+    second = temporal_feature_target_relationship_uncertainty(
+        temporal_relationship_frame_pandas,
+        **kwargs,
+    )
+
+    pd.testing.assert_frame_equal(first.bin_uncertainty, second.bin_uncertainty)
+    pd.testing.assert_frame_equal(temporal_relationship_frame_pandas, original)
+
+
+def test_temporal_relationship_uncertainty_rebuilds_bins_in_every_replicate(
+        temporal_relationship_frame_pandas,
+        monkeypatch,
+):
+    """MBB must precede bin assignment rather than resample within fixed bins."""
+    import alpha_research.evaluation.relationship as relationship_module
+
+    original = relationship_module._summarize_relationship_pairs
+    calls = []
+
+    def tracked_summary(*args, **kwargs):
+        calls.append(args[0].copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        relationship_module,
+        '_summarize_relationship_pairs',
+        tracked_summary,
+    )
+    temporal_feature_target_relationship_uncertainty(
+        temporal_relationship_frame_pandas,
+        feature='feature',
+        target='target',
+        block_length=5,
+        n_bootstraps=7,
+        n_bins=4,
+        random_state=3,
+    )
+
+    assert len(calls) == 8
+    assert 'bin' not in calls[1].columns
+
+
+def test_temporal_relationship_uncertainty_is_backend_equivalent(
+        temporal_relationship_frame_pandas,
+):
+    """Pandas and Polars inputs should produce the same seeded intervals."""
+    kwargs = {
+        'feature': 'feature',
+        'target': 'target',
+        'block_length': 5,
+        'n_bootstraps': 20,
+        'n_bins': 4,
+        'random_state': 11,
+    }
+    pandas_result = temporal_feature_target_relationship_uncertainty(
+        temporal_relationship_frame_pandas,
+        **kwargs,
+    )
+    polars_result = temporal_feature_target_relationship_uncertainty(
+        pl.from_pandas(temporal_relationship_frame_pandas),
+        **kwargs,
+    )
+
+    pd.testing.assert_frame_equal(
+        pandas_result.bin_uncertainty,
+        polars_result.bin_uncertainty.to_pandas(),
+        check_dtype=False,
+    )
+
+
+@pytest.mark.parametrize(
+    'mutator, kwargs, error_type, message',
+    [
+        (
+            lambda frame: frame.assign(symbol=['A'] * 39 + ['B']),
+            {},
+            ValueError,
+            'exactly one',
+        ),
+        (
+            lambda frame: frame.iloc[::-1],
+            {},
+            ValueError,
+            'increasing',
+        ),
+        (
+            lambda frame: frame.assign(target=lambda value: value['target'].mask(value.index == 3)),
+            {},
+            ValueError,
+            'every feature-target pair',
+        ),
+        (lambda frame: frame, {'n_bootstraps': 1}, ValueError, 'at least two'),
+        (lambda frame: frame, {'n_bootstraps': True}, TypeError, 'integer'),
+        (lambda frame: frame, {'block_length': 41}, ValueError, 'must not exceed'),
+        (
+            lambda frame: frame,
+            {'confidence_level': 1.0},
+            ValueError,
+            'strictly between',
+        ),
+    ],
+)
+def test_temporal_relationship_uncertainty_validates_temporal_and_mbb_inputs(
+        temporal_relationship_frame_pandas,
+        mutator,
+        kwargs,
+        error_type,
+        message,
+):
+    """Should reject invalid temporal ordering, pairs, and MBB configuration."""
+    arguments = {
+        'feature': 'feature',
+        'target': 'target',
+        'block_length': 5,
+        'n_bootstraps': 10,
+        'n_bins': 4,
+    }
+    arguments.update(kwargs)
+
+    with pytest.raises(error_type, match=message):
+        temporal_feature_target_relationship_uncertainty(
+            mutator(temporal_relationship_frame_pandas.copy()),
+            **arguments,
+        )
