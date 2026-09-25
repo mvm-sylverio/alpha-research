@@ -17,7 +17,29 @@ __all__ = ['fetch_mt_data_prices']
 
 
 def _ensure_datetime(value: str | datetime, name: str) -> datetime:
-    """Return a UTC-aware datetime; naive inputs are explicitly interpreted as UTC."""
+    """
+    Normalize a supported date value to a timezone-aware UTC datetime.
+
+    Parameters
+    ----------
+    value : str or datetime
+        Date in ``YYYY-MM-DD`` format or a datetime. Naive values are
+        interpreted as UTC; timezone-aware values are converted to UTC.
+    name : str
+        Name of the input parameter, used in validation error messages.
+
+    Returns
+    -------
+    datetime
+        The date represented as a timezone-aware UTC datetime.
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is neither a supported string nor a datetime.
+    ValueError
+        If a string does not match the ``YYYY-MM-DD`` format.
+    """
     if isinstance(value, str):
         try:
             value = datetime.strptime(value, '%Y-%m-%d').replace(tzinfo=UTC)
@@ -34,6 +56,23 @@ def _ensure_datetime(value: str | datetime, name: str) -> datetime:
 
 
 def _require_mt5():
+    """
+    Return the optional MetaTrader 5 client.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    module
+        The imported ``MetaTrader5`` module.
+
+    Raises
+    ------
+    ImportError
+        If the optional MT5 dependency is not installed or cannot be imported.
+    """
     if mt5 is None:
         raise ImportError(
             'MT5 ingestion requires the optional dependency. '
@@ -43,6 +82,26 @@ def _require_mt5():
 
 
 def _resolve_timeframe(timeframe: str | int) -> tuple[int, str]:
+    """
+    Resolve a timeframe label or MT5 enum to its enum value and public name.
+
+    Parameters
+    ----------
+    timeframe : str or int
+        Supported timeframe label, such as ``'H1'``, or its MT5 integer enum.
+
+    Returns
+    -------
+    tuple[int, str]
+        The MT5 enum value and its corresponding public timeframe label.
+
+    Raises
+    ------
+    TypeError
+        If ``timeframe`` is not a string or integer enum.
+    ValueError
+        If the label or integer enum is not supported.
+    """
     if isinstance(timeframe, str):
         try:
             return str_tf_to_mt5_tf[timeframe], timeframe
@@ -62,6 +121,23 @@ def _resolve_timeframe(timeframe: str | int) -> tuple[int, str]:
 
 
 def _chunk_days(timeframe_name: str) -> int:
+    """
+    Choose the request chunk size for a timeframe.
+
+    Parameters
+    ----------
+    timeframe_name : str
+        Public MT5 timeframe label.
+
+    Returns
+    -------
+    int
+        Number of calendar days per MT5 request chunk.
+
+    Raises
+    ------
+    None
+    """
     if timeframe_name in {'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M10', 'M12'}:
         return 5
     if timeframe_name in {'M15', 'M20', 'M30'}:
@@ -76,6 +152,33 @@ def _chunk_days(timeframe_name: str) -> int:
 
 
 def _rates_to_polars(given_rates, point: float) -> pl.DataFrame | None:
+    """
+    Convert MT5 rate records to the normalized UTC Polars schema.
+
+    MT5 candle times are epoch seconds in UTC. The conversion attaches the
+    UTC timezone without shifting those instants.
+
+    Parameters
+    ----------
+    given_rates : tabular records or None
+        Rate records returned by the MT5 client. Empty input is allowed.
+    point : float
+        Price-point size from the selected symbol metadata, used to convert
+        ``spread_pts`` into price units.
+
+    Returns
+    -------
+    pl.DataFrame or None
+        Sorted bars with UTC-aware ``time`` and columns ``time``, ``open``,
+        ``high``, ``low``, ``close``, ``volume``, ``spread`` and
+        ``spread_pts``; ``None`` for an empty chunk.
+
+    Raises
+    ------
+    ValueError
+        If the records cannot be converted to a table or omit required MT5
+        fields.
+    """
     if given_rates is None or len(given_rates) == 0:
         return None
 
@@ -109,15 +212,52 @@ def fetch_mt_data_prices(
         days_before: int = 0,
         backend: Literal['pandas', 'polars'] = 'polars',
 ) -> pd.DataFrame | pl.DataFrame:
-    """Fetch UTC-aware OHLCV bars from MetaTrader 5.
+    """
+    Fetch OHLCV price data from MetaTrader 5 (MT5).
 
-    Date-only strings and naive datetimes are interpreted as UTC. Aware
-    datetimes are converted to UTC before they are passed to MT5. MT5 returns
-    candle times as UTC epoch seconds; the returned ``time`` column retains
-    the UTC timezone for both supported DataFrame backends.
+    Data is fetched in chunks to accommodate MT5 request limits. Empty chunks
+    are skipped, overlapping timestamps are deduplicated, and the final data
+    is sorted chronologically. Date-only strings and naive datetimes are
+    interpreted as UTC; timezone-aware datetimes are converted to UTC before
+    being passed to MT5. MT5 returns candle times as UTC epoch seconds, and
+    the output ``time`` column retains the UTC timezone for both backends.
+    The MT5 client is shut down after every attempted initialization.
 
-    Empty chunks are skipped, and the request fails only if the complete range
-    contains no bars. MT5 is shut down after every attempted initialization.
+    Parameters
+    ----------
+    symbol : str
+        MT5 symbol from which prices are requested.
+    timeframe : str or int
+        Supported timeframe label, such as ``'H1'``, or its MT5 integer enum.
+    start_date, end_date : str or datetime
+        Request bounds. Strings must use ``YYYY-MM-DD`` and denote midnight
+        UTC. Naive datetimes are interpreted as UTC; aware datetimes are
+        converted to UTC. MT5 returns bars whose open times are greater than
+        or equal to ``start_date`` and less than or equal to ``end_date``.
+    days_before : int, default 0
+        Number of calendar days to prepend to ``start_date`` for warmup.
+    backend : {'pandas', 'polars'}, default 'polars'
+        DataFrame backend for the returned data.
+
+    Returns
+    -------
+    pd.DataFrame or pl.DataFrame
+        Chronologically sorted price data with UTC-aware ``time`` and columns
+        ``time``, ``open``, ``high``, ``low``, ``close``, ``volume``,
+        ``spread`` and ``spread_pts``. ``volume`` is MT5 tick volume.
+
+    Raises
+    ------
+    ImportError
+        If the optional MT5 dependency is unavailable.
+    TypeError
+        If a date, timeframe or ``days_before`` has an unsupported type.
+    ValueError
+        If the backend, timeframe, date format or date range is invalid, or
+        if ``days_before`` is negative.
+    RuntimeError
+        If MT5 initialization fails, symbol metadata is unavailable, or no
+        bars are returned for the complete requested range.
     """
     if backend not in ('pandas', 'polars'):
         raise ValueError("backend must be either 'pandas' or 'polars'.")
