@@ -33,6 +33,9 @@ input DataFrame backend whenever practical.
   diagnostics, partial association, decay analysis, bootstrap directional
   stability and FDR correction.
 - Rolling temporal association with percentile bootstrap bands.
+- Descriptive statistics for feature and target distributions overall, by
+  asset, by date, and in single-asset rolling windows, with quantile and Q-Q
+  visualizations.
 - Descriptive feature-target relationship diagnostics with pooled or grouped
   quantile/equal-width bins and raw/binned visualizations.
 - Visualization utilities for ranked IC and temporal-association summaries,
@@ -213,6 +216,51 @@ ax = plot_partial_temporal_association_summary(partial_summary, top_n=20)
 MBB resamples complete feature-target-covariate rows in contiguous blocks. The
 plot shows the existing Wald intervals and explicitly records the covariates
 conditioned on.
+
+## Distribution diagnostics
+
+Distribution diagnostics describe a feature or target before interpreting its
+association with a target. The same finite-value statistics can summarize all
+observations, each asset, each date's cross-section, or consecutive windows of
+one asset. Missing and infinite values remain in the reported counts, while
+quantiles and moments use finite values only. `std` is the sample standard
+deviation; skewness and Fisher excess kurtosis are bias-corrected and are
+undefined for insufficient or constant samples.
+
+```python
+from alpha_research.evaluation import distribution_summary, rolling_distribution_summary
+from alpha_research.visualization import (
+    plot_distribution_histogram,
+    plot_distribution_qq,
+    plot_distribution_quantiles,
+)
+
+# The frames contain time, symbol, and one feature column.
+# feature_panel contains multiple assets; single_asset_feature_frame contains one.
+overall = distribution_summary(single_asset_feature_frame)
+by_symbol = distribution_summary(feature_panel, group_by='symbol')
+by_date = distribution_summary(feature_panel, group_by='time')
+rolling_distribution = rolling_distribution_summary(
+    single_asset_feature_frame,
+    window_size=252,
+    window_step=20,
+)
+
+histogram_ax = plot_distribution_histogram(single_asset_feature_frame)
+qq_ax = plot_distribution_qq(single_asset_feature_frame)
+cross_section_ax = plot_distribution_quantiles(by_date)
+rolling_ax = plot_distribution_quantiles(
+    rolling_distribution,
+    time_col='window_end',
+)
+```
+
+Each plot accepts an existing `ax` and returns only that axis. The rolling
+distribution uses input-row windows and can share `window_size` and
+`window_step` with `rolling_temporal_association()` when both functions receive
+the same ordered time grid. Distribution windows still report available finite
+values when other observations are missing; rolling temporal association keeps
+its strict complete-pair rule.
 
 ## Rolling temporal association
 
