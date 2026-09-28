@@ -38,6 +38,9 @@ input DataFrame backend whenever practical.
   visualizations.
 - Descriptive feature-target relationship diagnostics with pooled or grouped
   quantile/equal-width bins and raw/binned visualizations.
+- Preliminary economic significance from caller-defined feature groups, with
+  return contrasts, explicit cost components, and margins in fractions, percent,
+  or basis points.
 - Visualization utilities for ranked IC and temporal-association summaries,
   partial summaries with visible covariates, decay curves, rolling temporal
   association, time-series feature values, and cross-sectional feature summaries.
@@ -348,6 +351,43 @@ the tables returned by `ic_decay()` to `plot_decay_curves()` with
 `value_col='mean'`; IC-decay standard deviation is not treated as an interval.
 For multiple features, `temporal_association_decay_summary_table()` returns the
 scalar summary table together with each feature's complete horizon-level result.
+
+## Preliminary economic significance
+
+`economic_return_contrast()` reuses the finite pairs and feature-only bins from
+`feature_target_relationship()`. Each call compares one caller-defined group A
+with group B. Groups can select bins, exact feature values, or numeric bounds;
+the caller decides which comparisons are economically meaningful.
+
+```python
+from alpha_research.evaluation import (
+    FeatureGroupSpec,
+    economic_return_contrast,
+    feature_target_relationship,
+    preliminary_cost_margin,
+)
+
+relationship = feature_target_relationship(
+    single_asset_frame, 'feature', 'fwd_ret_5', n_bins=10,
+)
+contrast = economic_return_contrast(
+    relationship,
+    FeatureGroupSpec('Q10', bins=(10,)),
+    FeatureGroupSpec('Q1', bins=(1,)),
+    unit='percent',
+)
+base = preliminary_cost_margin(
+    contrast,
+    {'spread': 0.001, 'fees': 0.0002, 'slippage': 0.0003},
+    scenario='base',
+)
+```
+
+The target and every supplied cost component must be fractional returns on the
+same exposure basis. The result converts means, effect, costs, and margin to
+the requested output unit (`fraction`, `percent`, or `bps`). The library does
+not estimate market costs or infer trade counts. These descriptive contrasts
+and margins are not a backtest or a realized profit calculation.
 
 ## Scope
 
