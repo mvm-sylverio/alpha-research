@@ -33,6 +33,8 @@ input DataFrame backend whenever practical.
   diagnostics, partial association, decay analysis, bootstrap directional
   stability and FDR correction.
 - Rolling temporal association with percentile bootstrap bands.
+- Offline PELT change-point detection for any strictly ordered numeric series,
+  with breakpoints and descriptive statistics for each segment.
 - Descriptive statistics for feature and target distributions overall, by
   asset, by date, and in single-asset rolling windows, with quantile and Q-Q
   visualizations.
@@ -62,6 +64,12 @@ Install Matplotlib support when using plotting functions:
 
 ```bash
 pip install "alpha-research[viz]"
+```
+
+Install the optional `ruptures` dependency when using PELT change-point detection:
+
+```bash
+pip install "alpha-research[changepoint]"
 ```
 
 Install MetaTrader 5 support for OHLCV data ingestion:
@@ -297,6 +305,37 @@ Each rolling row contains the observed association, percentile bootstrap bounds,
 bootstrap directional stability, effective bootstrap count, and a computation
 status. The plot function accepts `ax=...`, allowing an application to compose
 the association panel with its own shared-time context panels.
+
+## Change-point detection
+
+`detect_change_points()` applies offline PELT segmentation to any strictly
+ordered numeric series in a Pandas or Polars DataFrame. Choose the segment cost
+for the type of change under study: `l2` targets mean shifts, while `normal`
+models changes in Gaussian mean and variance. The penalty controls how many
+breakpoints are selected and depends on the cost and scale of the series.
+The example penalty below is illustrative; it is not a universal default.
+
+```python
+from alpha_research.evaluation import detect_change_points
+
+# rolling_frame contains time-ordered observations and a rolling volatility series.
+result = detect_change_points(
+    rolling_frame,
+    value_col='realized_volatility',
+    model='l2',
+    penalty=8.0,
+    min_size=20,
+)
+
+break_dates = [breakpoint.time for breakpoint in result.breakpoints]
+segment_means = [segment.mean for segment in result.segments]
+```
+
+The returned breakpoints are retrospective estimates from the full input
+series, not p-values or evidence that a change was observable at the estimated
+time. Each breakpoint marks the first observation of a new segment. See
+[`detect_change_points`](alpha_research/evaluation/change_points.py) for the
+full parameter and validation contract.
 
 ## Association and IC decay
 
