@@ -8,6 +8,10 @@ import polars as pl
 
 from alpha_research._utils import _validate_positive_integer
 
+from alpha_research.progress import (
+    ProgressCallback, _progress_iter, _report_progress, _validate_progress_callback,
+)
+
 
 __all__ = [
     'MonteCarloMetricDiagnostics',
@@ -575,6 +579,8 @@ def monte_carlo_error(
         n_runs: int = 5,
         random_state: int | None = None,
         return_bootstrap_results: bool = False,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> MonteCarloErrorResult:
     """
     Evaluate bootstrap Monte Carlo stability across candidate replication counts.
@@ -672,6 +678,13 @@ def monte_carlo_error(
         deterministic reference run 1 at the recommended B.
         Results from different runs are never concatenated.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports independent runs, evaluated grid levels, and metric calls.
+
     Returns
     -------
     MonteCarloErrorResult
@@ -680,7 +693,10 @@ def monte_carlo_error(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If a callable, tolerance mapping, random state, bootstrap result, or
         metrics output uses an unsupported type.
     ValueError
@@ -689,6 +705,7 @@ def monte_carlo_error(
     KeyError
         If metrics_fn omits a configured metric.
     """
+    _validate_progress_callback(on_progress)
     if not callable(bootstrap_fn):
         raise TypeError('bootstrap_fn must be callable.')
 
@@ -718,7 +735,7 @@ def monte_carlo_error(
     maximum_n_bootstraps = grid[-1]
     bootstrap_results_by_run = []
 
-    for run_random_state in run_random_states:
+    for run_random_state in _progress_iter(run_random_states, on_progress, 'convergence_runs'):
         bootstrap_results = bootstrap_fn(
             n_bootstraps=maximum_n_bootstraps,
             random_state=run_random_state,
@@ -730,10 +747,10 @@ def monte_carlo_error(
     previous_level_passed = False
     pending_n_bootstraps = None
 
-    for n_bootstraps in grid:
+    for n_bootstraps in _progress_iter(grid, on_progress, 'convergence_levels'):
         metric_values = {metric_name: [] for metric_name in metric_names}
 
-        for bootstrap_results in bootstrap_results_by_run:
+        for bootstrap_results in _progress_iter(bootstrap_results_by_run, on_progress, 'convergence_metrics'):
             bootstrap_prefix = _select_bootstrap_prefix(
                 bootstrap_results,
                 n_bootstraps,
@@ -769,6 +786,7 @@ def monte_carlo_error(
 
         if previous_level_passed and all_metrics_passed:
             diagnostics[-1] = replace(level_diagnostic, convergence_confirmed=True)
+            _report_progress(on_progress, 'convergence_levels', len(diagnostics), len(grid))
 
             return MonteCarloErrorResult(
                 recommended_n_bootstraps=pending_n_bootstraps,

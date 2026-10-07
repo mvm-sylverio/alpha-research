@@ -12,6 +12,12 @@ from alpha_research._utils import (
     _validate_unique_keys,
 )
 from alpha_research.evaluation.timeseries import _validate_single_symbol
+from alpha_research.progress import (
+    ProgressCallback,
+    _progress_iter,
+    _progress_kwargs,
+    _validate_progress_callback,
+)
 from alpha_research.resampling.block_bootstrap import (
     bootstrap_metrics,
     generate_moving_blocks,
@@ -125,6 +131,8 @@ def _summarize_relationship_pairs(
         n_bins: int,
         binning: Literal['quantile', 'equal_width'],
         group_col: str | None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, int]:
     """Assign feature bins and summarize target values without key validation.
 
@@ -141,6 +149,13 @@ def _summarize_relationship_pairs(
     group_col : str | None
         Optional column within which bins are rebuilt independently.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports groups before bin assignment and after processing.
+
     Returns
     -------
     tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, int]
@@ -149,6 +164,10 @@ def _summarize_relationship_pairs(
 
     Raises
     ------
+    TypeError
+        If on_progress is not a synchronous callable or None.
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If no observation can receive a feature bin.
 
@@ -159,6 +178,7 @@ def _summarize_relationship_pairs(
     so observation-key validation deliberately remains in the public entry
     points rather than in this helper.
     """
+    _validate_progress_callback(on_progress)
     pairs = pairs.copy()
     pairs['bin'] = np.nan
     grouped_indices = (
@@ -166,7 +186,7 @@ def _summarize_relationship_pairs(
         if group_col is None
         else list(pairs.groupby(group_col, sort=False, dropna=False).groups.items())
     )
-    for _, indices in grouped_indices:
+    for _, indices in _progress_iter(grouped_indices, on_progress, 'relationship_groups'):
         values = pairs.loc[indices, feature]
         if len(values) < n_bins:
             continue
@@ -248,6 +268,8 @@ def feature_target_relationship(
         group_col: str | None = None,
         time_col: str = 'time',
         symbol_col: str = 'symbol',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> FeatureTargetRelationshipResult:
     """Summarize how a target behaves across low-to-high feature values.
 
@@ -283,6 +305,13 @@ def feature_target_relationship(
     symbol_col : str, default 'symbol'
         Asset identifier key column.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports groups before bin assignment and after processing.
+
     Returns
     -------
     FeatureTargetRelationshipResult
@@ -292,9 +321,12 @@ def feature_target_relationship(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     KeyError
         If a required column is absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df or a column-name argument has an unsupported type.
     ValueError
         If names, keys, numeric values, binning parameters, or sample size are
@@ -352,6 +384,7 @@ def feature_target_relationship(
             group_col='time',
         )
     """
+    _validate_progress_callback(on_progress)
     for name, value in [
         ('feature', feature),
         ('target', target),
@@ -424,6 +457,7 @@ def feature_target_relationship(
             n_bins,
             binning,
             group_col,
+            **_progress_kwargs(on_progress),
         )
     )
 
@@ -469,6 +503,8 @@ def temporal_feature_target_relationship_uncertainty(
         random_state: int | None = None,
         time_col: str = 'time',
         symbol_col: str = 'symbol',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> FeatureTargetRelationshipUncertaintyResult:
     """Estimate pointwise temporal MBB uncertainty for feature-target bins.
 
@@ -501,6 +537,13 @@ def temporal_feature_target_relationship_uncertainty(
     time_col, symbol_col : str
         Temporal observation key columns.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports groups, blocks, samples, estimates, and uncertainty bins.
+
     Returns
     -------
     FeatureTargetRelationshipUncertaintyResult
@@ -508,9 +551,12 @@ def temporal_feature_target_relationship_uncertainty(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     KeyError
         If a required column is absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df, names, or bootstrap arguments use unsupported types.
     ValueError
         If temporal keys, observations, bins, or bootstrap settings are
@@ -524,6 +570,7 @@ def temporal_feature_target_relationship_uncertainty(
     Repeated post-selection interpretation still requires out-of-sample
     validation.
     """
+    _validate_progress_callback(on_progress)
     observed = feature_target_relationship(
         df=df,
         feature=feature,
@@ -533,6 +580,7 @@ def temporal_feature_target_relationship_uncertainty(
         group_col=None,
         time_col=time_col,
         symbol_col=symbol_col,
+        **_progress_kwargs(on_progress),
     )
     _validate_single_symbol(df, symbol_col)
     _validate_time_order(df, time_col)
@@ -568,16 +616,18 @@ def temporal_feature_target_relationship_uncertainty(
         bootstrap_input,
         block_length=block_length,
         step=bootstrap_step,
+        **_progress_kwargs(on_progress),
     )
     samples = moving_block_bootstrap(
         blocks,
         sample_size=len(bootstrap_input),
         n_bootstraps=n_bootstraps,
         random_state=random_state,
+        **_progress_kwargs(on_progress),
     )
 
     bootstrap_summaries = []
-    for bootstrap_id, sample in enumerate(samples, start=1):
+    for bootstrap_id, sample in enumerate(_progress_iter(samples, on_progress, 'bootstrap_estimates'), start=1):
         try:
             _, summary, _, _ = _summarize_relationship_pairs(
                 sample,
@@ -603,7 +653,7 @@ def temporal_feature_target_relationship_uncertainty(
         else observed.bin_summary.to_pandas()
     )
     uncertainty_rows = []
-    for bin_number in observed_summary['bin'].tolist():
+    for bin_number in _progress_iter(observed_summary['bin'].tolist(), on_progress, 'uncertainty_bins'):
         bin_replicates = bootstrap_frame.loc[
             bootstrap_frame['bin'] == bin_number
         ]

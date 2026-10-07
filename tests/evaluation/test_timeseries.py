@@ -34,6 +34,133 @@ from alpha_research.resampling.block_bootstrap import (
 )
 
 
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('partial', [False, True])
+def test_temporal_summary_progress_preserves_seeded_output(temporal_summary_df_pandas, backend, partial):
+    """Should retain seeded outputs and report sample generation separately from statistical estimation."""
+    frame = temporal_summary_df_pandas
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    function = partial_temporal_association_summary_table if partial else temporal_association_summary_table
+    args = {'df': frame, 'feature_list': ['feature_a'], 'target': 'target', 'block_length': 3,
+                'n_bootstraps': 12, 'random_state': 71}
+    if partial:
+        args['covariates'] = ['feature_b']
+    expected = function(**args)
+    events = []
+    result = function(**args, on_progress=lambda *event: events.append(event))
+    # Existing tests cover numerical correctness; this checks instrumentation transparency.
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(result, expected)
+    else:
+        assert result.equals(expected)
+    assert ('feature/feature_a/bootstrap_samples', 12, 12) in events
+    assert ('feature/feature_a/bootstrap_estimates', 12, 12) in events
+    assert events[-1] == ('features', 1, 1)
+
+
+@pytest.mark.parametrize('partial', [False, True])
+@pytest.mark.parametrize('phase_suffix', ['moving_blocks', 'bootstrap_samples', 'bootstrap_estimates'])
+def test_temporal_summary_cancels_inside_each_work_loop(temporal_summary_df_pandas, partial, phase_suffix):
+    """Should propagate a callback ValueError unchanged from each nested loop."""
+    function = partial_temporal_association_summary_table if partial else temporal_association_summary_table
+    args = {'df': temporal_summary_df_pandas, 'feature_list': ['feature_a'], 'target': 'target',
+                'block_length': 3, 'n_bootstraps': 12, 'random_state': 71}
+    if partial:
+        args['covariates'] = ['feature_b']
+    exception = ValueError('cancel')
+    events = []
+    def callback(phase, completed, total):
+        """Should stop one chosen local loop after its first successful unit."""
+        events.append((phase, completed, total))
+        if phase.endswith('/' + phase_suffix) and completed == 1:
+            raise exception
+    with pytest.raises(ValueError) as caught:
+        function(**args, on_progress=callback)
+    assert caught.value is exception
+    assert events[-1][1] == 1
+    assert ('features', 1, 1) not in events
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_rolling_progress_counts_skipped_windows(rolling_temporal_df_pandas, backend):
+    """Should count missing and undefined windows as processed without creating bootstrap estimates."""
+    frame = rolling_temporal_df_pandas.copy()
+    frame['feature'] = 1.0
+    frame.loc[frame.index[0], 'target'] = np.nan
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    events = []
+    result = rolling_temporal_association(frame, 'feature', 'target', window_size=5, block_length=2,
+                                         n_bootstraps=8, random_state=2,
+                                         on_progress=lambda *event: events.append(event))
+    # Eight endpoints for 12 observations and a five-observation window.
+    assert len(result.rolling_frame) == 8
+    assert events[-1] == ('rolling_windows', 8, 8)
+    assert all('bootstrap_estimates' not in event[0] for event in events)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_rolling_progress_preserves_seeded_windows(rolling_temporal_df_pandas, backend):
+    """Should retain original child seeds and distinguish bootstrap work within each window."""
+    frame = rolling_temporal_df_pandas if backend == 'pandas' else pl.from_pandas(rolling_temporal_df_pandas)
+    args = {'df': frame, 'feature': 'feature', 'target': 'target', 'window_size': 6,
+                'block_length': 2, 'n_bootstraps': 8, 'random_state': 17}
+    expected = rolling_temporal_association(**args)
+    events = []
+    result = rolling_temporal_association(**args, on_progress=lambda *event: events.append(event))
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(result.rolling_frame, expected.rolling_frame)
+        pd.testing.assert_frame_equal(result.summary_table, expected.summary_table)
+    else:
+        assert result.rolling_frame.equals(expected.rolling_frame)
+        assert result.summary_table.equals(expected.summary_table)
+    assert ('window/5/bootstrap_samples', 8, 8) in events
+    assert ('window/11/bootstrap_estimates', 8, 8) in events
+    assert events[-1] == ('rolling_windows', 7, 7)
+
+
+@pytest.mark.parametrize('exception_type', [ValueError, TypeError, RuntimeError])
+def test_rolling_cancellation_is_not_undefined_bootstrap(rolling_temporal_df_pandas, exception_type):
+    """Should propagate observation failure instead of returning an undefined-bootstrap window."""
+    exception = exception_type('cancel')
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if phase.endswith('bootstrap_estimates') and done == 1 else None
+    with pytest.raises(exception_type) as caught:
+        rolling_temporal_association(rolling_temporal_df_pandas, 'feature', 'target',
+                                     window_size=6, block_length=2, n_bootstraps=8,
+                                     random_state=17, on_progress=callback)
+    assert caught.value is exception
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_temporal_decay_progress_preserves_shared_targets_and_child_streams(temporal_decay_df_pandas, backend):
+    """Should observe feature/horizon/bootstrap work while retaining target reuse and seeded output."""
+    frame = temporal_decay_df_pandas if backend == 'pandas' else pl.from_pandas(temporal_decay_df_pandas)
+    generated = []
+    def target_fn(data, horizon):
+        """Should generate exactly one shifted target per requested horizon."""
+        generated.append(horizon)
+        if backend == 'pandas':
+            return data[['time', 'symbol']].assign(**{f'target_{horizon}': data['target_seed'].shift(-horizon)})
+        return data.select('time', 'symbol', pl.col('target_seed').shift(-horizon).alias(f'target_{horizon}'))
+    args = {'df_features': frame, 'feature_list': ['feature_a', 'feature_b'], 'target_data': frame,
+                'horizons': [3, 1], 'target_fn': target_fn, 'block_length': 3, 'n_bootstraps': 8, 'random_state': 42}
+    expected = temporal_association_decay_summary_table(**args)
+    generated.clear()
+    events = []
+    result = temporal_association_decay_summary_table(**args, on_progress=lambda *event: events.append(event))
+    assert generated == [1, 3]
+    for feature in ['feature_a', 'feature_b']:
+        if backend == 'pandas':
+            pd.testing.assert_frame_equal(result.decay_results[feature].table, expected.decay_results[feature].table)
+        else:
+            assert result.decay_results[feature].table.equals(expected.decay_results[feature].table)
+        for horizon in [1, 3]:
+            assert (f'feature/{feature}/horizon/{horizon}/feature/{feature}/bootstrap_samples', 8, 8) in events
+            assert (f'feature/{feature}/horizon/{horizon}/feature/{feature}/bootstrap_estimates', 8, 8) in events
+    assert events[-1] == ('features', 2, 2)
+
+
 # ------------------------------------------------------
 # fixtures
 # ------------------------------------------------------

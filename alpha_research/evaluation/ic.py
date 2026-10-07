@@ -20,6 +20,10 @@ from alpha_research._utils import (
 )
 from alpha_research.features.schema import get_feature_name, join_feature_target_frames
 
+from alpha_research.progress import (
+    ProgressCallback, _progress_iter, _progress_kwargs, _validate_progress_callback,
+)
+
 __all__ = ['information_coefficient', 'compute_ic', 'partial_information_coefficient',
            'ICMetrics', 'compute_ic_metrics', 'ic_summary_table',
            'PartialICSummaryResult', 'partial_ic_summary_table', 'ic_decay',
@@ -193,6 +197,8 @@ def partial_information_coefficient(
         date_column: str = 'time',
         ic_column: str = 'partial_ic',
         min_n: int | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Compute cross-sectional partial information coefficients by date.
@@ -219,6 +225,13 @@ def partial_information_coefficient(
     min_n : int | None, default None
         Optional additional complete-observation threshold per date.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports dates; one residualization/correlation remains atomic.
+
     Returns
     -------
     pd.DataFrame | pl.DataFrame
@@ -226,20 +239,24 @@ def partial_information_coefficient(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     KeyError
         If a selected column is absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df or a partial-correlation argument has an unsupported type.
     ValueError
         If the partial-correlation specification is invalid.
     """
+    _validate_progress_callback(on_progress)
     normalized_covariates = _normalize_covariates(covariates)
     _validate_partial_columns(feature, target, normalized_covariates)
     _validate_df(df, [date_column, feature, target, *normalized_covariates])
 
     rows = []
     if isinstance(df, pd.DataFrame):
-        for date, group in df.groupby(date_column, sort=True):
+        for date, group in _progress_iter(df.groupby(date_column, sort=True), on_progress, 'partial_ic_dates', total=df.groupby(date_column, sort=True).ngroups if on_progress is not None else None):
             partial_ic = partial_correlation(
                 group,
                 feature=feature,
@@ -253,7 +270,7 @@ def partial_information_coefficient(
 
         return pd.DataFrame(rows, columns=[date_column, ic_column])
 
-    for group in df.sort(date_column).partition_by(date_column, maintain_order=True):
+    for group in _progress_iter(df.sort(date_column).partition_by(date_column, maintain_order=True), on_progress, 'partial_ic_dates'):
         date = group[date_column][0]
         partial_ic = partial_correlation(
             group,
@@ -406,7 +423,8 @@ def ic_summary_table(
         corr_method: Literal['pearson', 'spearman'] = 'spearman',
         date_column: str = 'time',
         feature_groups: dict[str, str] | None = None,
-
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> ICSummaryResult:
     """
     Compute the information coefficient (IC) between every feature in feature_list and the target.
@@ -438,11 +456,26 @@ def ic_summary_table(
         All features are labeled 'ungrouped' if feature_groups is not provided.
         A feature is also labeled 'ungrouped' if its group is not found on feature_groups.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports features; each grouped IC calculation remains atomic.
+
     Returns
     -------
     ICSummaryResult
         IC summary table and dict containing the DataFrames of the ic time-series per feature.
+    Raises
+    ------
+    TypeError
+        If on_progress is not a synchronous callable or None.
+    Exception
+        Propagates observer exceptions unchanged.
+
     """
+    _validate_progress_callback(on_progress)
     # Guard against empty list
     if not feature_list:
         raise ValueError("feature_list must not be empty.")
@@ -450,7 +483,7 @@ def ic_summary_table(
     rows = []
     ic_dfs_dict = {}
 
-    for feature in feature_list:
+    for feature in _progress_iter(feature_list, on_progress, 'features'):
         # the existence of the column on the df is already checked on compute_ic
         df_ic = compute_ic(df, feature, target, corr_method, date_column)
 
@@ -521,6 +554,8 @@ def partial_ic_summary_table(
         date_column: str = 'time',
         feature_groups: dict[str, str] | None = None,
         min_n: int | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> PartialICSummaryResult:
     """
     Summarize cross-sectional partial ICs for multiple features.
@@ -549,6 +584,13 @@ def partial_ic_summary_table(
     min_n : int | None, default None
         Optional additional complete-observation threshold per cross-section.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports features and cross-sectional dates within each feature.
+
     Returns
     -------
     PartialICSummaryResult
@@ -556,13 +598,17 @@ def partial_ic_summary_table(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     KeyError
         If a selected column is absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df or a partial-correlation argument has an unsupported type.
     ValueError
         If feature_list or the partial-correlation specification is invalid.
     """
+    _validate_progress_callback(on_progress)
     if not feature_list:
         raise ValueError('feature_list must not be empty.')
     if len(set(feature_list)) != len(feature_list):
@@ -574,7 +620,7 @@ def partial_ic_summary_table(
 
     rows = []
     partial_ic_frames = {}
-    for feature in feature_list:
+    for feature in _progress_iter(feature_list, on_progress, 'features'):
         partial_ic_frame = partial_information_coefficient(
             df=df,
             feature=feature,
@@ -583,6 +629,7 @@ def partial_ic_summary_table(
             corr_method=corr_method,
             date_column=date_column,
             min_n=min_n,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         partial_ic_frames[feature] = partial_ic_frame
         partial_ic_series = partial_ic_frame['partial_ic']
@@ -644,6 +691,8 @@ def ic_decay(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> ICDecayResult:
     """
     Compute the Information Coefficient decay curve of one feature.
@@ -689,6 +738,13 @@ def ic_decay(
         False discovery rate.
     fdr_method : {'bh', 'by'}
         Multiple-testing correction method.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports target/evaluation horizons; each grouped IC remains atomic.
+
     Returns
     -------
     ICDecayResult
@@ -701,13 +757,17 @@ def ic_decay(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If df_feature or target_data is invalid, feature is missing, or horizons is
         empty, contains duplicates, or contains non-positive values.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df_feature, target_data, or a target returned by target_fn use different
         DataFrame backends.
     """
+    _validate_progress_callback(on_progress)
     _validate_df(df_feature, [date_column, symbol_column, feature])
 
     target_frames = _generate_target_frames(
@@ -715,6 +775,7 @@ def ic_decay(
         target_data=target_data,
         horizons=horizons,
         target_fn=target_fn,
+        **_progress_kwargs(on_progress),
     )
     return _ic_decay_from_target_frames(
         df_feature=df_feature,
@@ -726,6 +787,7 @@ def ic_decay(
         feature_groups=feature_groups,
         fdr=fdr,
         fdr_method=fdr_method,
+        **_progress_kwargs(on_progress),
     )
 
 
@@ -734,6 +796,8 @@ def _generate_target_frames(
         target_data: pd.DataFrame | pl.DataFrame,
         horizons: list[int],
         target_fn: TargetFn,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> dict[int, pd.DataFrame | pl.DataFrame]:
     """
     Generate one target DataFrame for each requested horizon.
@@ -750,6 +814,13 @@ def _generate_target_frames(
     target_fn : Callable[[pd.DataFrame | pl.DataFrame, int], pd.DataFrame | pl.DataFrame]
         Function called as target_fn(target_data, horizon=horizon).
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports sorted target horizons; each target is generated once.
+
     Returns
     -------
     dict[int, pd.DataFrame | pl.DataFrame]
@@ -757,10 +828,13 @@ def _generate_target_frames(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If target_data is invalid, horizons is empty, contains duplicates, or
         contains non-positive values.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df, target_data, or a target returned by target_fn use different
         DataFrame backends.
 
@@ -769,6 +843,7 @@ def _generate_target_frames(
     This helper computes every target once. The resulting mapping can be
     reused across multiple features without calling target_fn again.
     """
+    _validate_progress_callback(on_progress)
     _validate_df(target_data, [])
     _validate_same_backend(df_feature, target_data)
 
@@ -783,7 +858,7 @@ def _generate_target_frames(
 
     target_frames = {}
 
-    for horizon in sorted(horizons):
+    for horizon in _progress_iter(sorted(horizons), on_progress, 'target_horizons'):
         target_df = target_fn(target_data, horizon=horizon)
 
         _validate_same_backend(df_feature, target_df)
@@ -803,6 +878,8 @@ def _ic_decay_from_target_frames(
         feature_groups: dict[str, str] | None,
         fdr: float,
         fdr_method: Literal['bh', 'by'],
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> ICDecayResult:
     """
     Compute one feature's IC decay from pre-generated target DataFrames.
@@ -829,6 +906,13 @@ def _ic_decay_from_target_frames(
         False discovery rate.
     fdr_method : {'bh', 'by'}
         Multiple-testing correction method.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports evaluation horizons without regenerating targets.
+
     Returns
     -------
     ICDecayResult
@@ -836,9 +920,12 @@ def _ic_decay_from_target_frames(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If the feature or target DataFrames fail the join validation.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If feature and target DataFrames use different backends.
 
     Notes
@@ -847,6 +934,7 @@ def _ic_decay_from_target_frames(
     ic_decay_summary_table() so that batch evaluation can reuse targets
     generated once per horizon.
     """
+    _validate_progress_callback(on_progress)
     feature_group = (
         feature_groups.get(feature, 'ungrouped')
         if feature_groups is not None
@@ -856,7 +944,7 @@ def _ic_decay_from_target_frames(
     rows = []
     ic_frames = {}
 
-    for horizon, target_df in target_frames.items():
+    for horizon, target_df in _progress_iter(target_frames.items(), on_progress, 'horizons'):
         target_col = get_feature_name(target_df, date_column, symbol_column)
 
         joined_df = join_feature_target_frames(
@@ -1129,6 +1217,8 @@ def ic_decay_summary_table(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> ICDecaySummaryTableResult:
     """
     Compute IC decay diagnostics for multiple columns in a wide DataFrame.
@@ -1168,6 +1258,13 @@ def ic_decay_summary_table(
     fdr_method : {'bh', 'by'}
         Multiple-testing correction applied independently to the horizons
         of each feature.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports target horizons, features, and nested evaluation horizons.
+
     Returns
     -------
     ICDecaySummaryTableResult
@@ -1179,13 +1276,17 @@ def ic_decay_summary_table(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If feature_list is empty or contains duplicates, df_features or target_data is
         invalid, or horizons are invalid.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df, target_data, or a target returned by target_fn use different
         DataFrame backends.
     """
+    _validate_progress_callback(on_progress)
     if not feature_list:
         raise ValueError("feature_list must not be empty.")
 
@@ -1199,12 +1300,13 @@ def ic_decay_summary_table(
         target_data=target_data,
         horizons=horizons,
         target_fn=target_fn,
+        **_progress_kwargs(on_progress),
     )
 
     rows = []
     decay_results = {}
 
-    for feature in feature_list:
+    for feature in _progress_iter(feature_list, on_progress, 'features'):
         decay_result = _ic_decay_from_target_frames(
             df_feature=df_features,
             feature=feature,
@@ -1215,6 +1317,7 @@ def ic_decay_summary_table(
             feature_groups=feature_groups,
             fdr=fdr,
             fdr_method=fdr_method,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
 
         decay_table = decay_result.table

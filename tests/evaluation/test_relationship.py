@@ -12,6 +12,57 @@ from alpha_research.evaluation import (
 from alpha_research.evaluation.relationship import _summarize_relationship_pairs
 
 
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_relationship_progress_counts_groups(relationship_frame_pandas, backend):
+    """Should retain hand-verifiable bin means while reporting two cross-sectional groups."""
+    frame = relationship_frame_pandas if backend == 'pandas' else pl.from_pandas(relationship_frame_pandas)
+    events = []
+    result = feature_target_relationship(frame, 'feature', 'target', n_bins=2, group_col='time',
+                                         on_progress=lambda *event: events.append(event))
+    assert result.bin_summary['target_mean'].to_list() == pytest.approx([3.75, 18.75])
+    assert events[-1] == ('relationship_groups', 2, 2)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('exception_type', [ValueError, TypeError, RuntimeError])
+def test_relationship_uncertainty_does_not_swallow_cancellation(backend, exception_type):
+    """Should propagate callback errors outside the handler that skips invalid bootstrap bins."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=8), 'symbol': ['A'] * 8,
+                          'feature': [1., 2., 3., 4., 5., 6., 7., 8.],
+                          'target': [2., 3., 4., 7., 5., 8., 9., 6.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    exception = exception_type('cancel')
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if phase == 'bootstrap_estimates' and done == 1 else None
+    with pytest.raises(exception_type) as caught:
+        temporal_feature_target_relationship_uncertainty(frame, 'feature', 'target', block_length=2,
+                                                         n_bootstraps=8, n_bins=2, random_state=17,
+                                                         on_progress=callback)
+    assert caught.value is exception
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_relationship_uncertainty_observation_preserves_seeded_outputs(backend):
+    """Should retain seeded pairs, bin summaries, and uncertainty tables with observation enabled."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=8), 'symbol': ['A'] * 8,
+                          'feature': [1., 2., 3., 4., 5., 6., 7., 8.],
+                          'target': [2., 3., 4., 7., 5., 8., 9., 6.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    args = {'df': frame, 'feature': 'feature', 'target': 'target', 'block_length': 2,
+                'n_bootstraps': 8, 'n_bins': 2, 'random_state': 17}
+    expected = temporal_feature_target_relationship_uncertainty(**args)
+    events = []
+    result = temporal_feature_target_relationship_uncertainty(**args, on_progress=lambda *event: events.append(event))
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(result.bin_uncertainty, expected.bin_uncertainty)
+    else:
+        assert result.bin_uncertainty.equals(expected.bin_uncertainty)
+    assert ('bootstrap_samples', 8, 8) in events
+    assert ('bootstrap_estimates', 8, 8) in events
+    assert events[-1] == ('uncertainty_bins', 2, 2)
+
+
 @pytest.fixture
 def relationship_frame_pandas():
     """Create two four-asset cross-sections with an increasing relationship."""

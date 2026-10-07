@@ -34,6 +34,10 @@ from alpha_research.resampling.block_bootstrap import (
     moving_block_bootstrap,
 )
 
+from alpha_research.progress import (
+    ProgressCallback, _progress_iter, _progress_kwargs, _validate_progress_callback,
+)
+
 
 __all__ = [
     'temporal_association',
@@ -512,6 +516,8 @@ def rolling_temporal_association(
         random_state: int | None = None,
         time_col: str = 'time',
         symbol_col: str = 'symbol',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> RollingTemporalAssociationResult:
     """
     Compute bootstrap temporal-association diagnostics in rolling time windows.
@@ -559,6 +565,13 @@ def rolling_temporal_association(
         the end of each window.
     symbol_col : str, default 'symbol'
         Single-asset identifier column.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports windows and their blocks, samples, and estimates.
+
     Returns
     -------
     RollingTemporalAssociationResult
@@ -570,10 +583,13 @@ def rolling_temporal_association(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If temporal data are invalid, a sizing argument is invalid, the input
         is shorter than window_size, or bootstrap_method is unsupported.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df or random_state has an unsupported type.
 
     Notes
@@ -588,6 +604,7 @@ def rolling_temporal_association(
     directional-stability diagnostic, not a p-value. No pointwise hypothesis
     tests are reported because rolling windows overlap strongly.
     """
+    _validate_progress_callback(on_progress)
     _validate_df(df, [time_col, symbol_col, feature, target])
     _validate_single_symbol(df, symbol_col)
     _validate_time_order(df, time_col)
@@ -629,10 +646,10 @@ def rolling_temporal_association(
     symbol = df[symbol_col].iloc[0] if isinstance(df, pd.DataFrame) else df[symbol_col][0]
     rows = []
 
-    for end_position, window_random_state in zip(
+    for end_position, window_random_state in _progress_iter(zip(
             window_end_positions,
             window_random_states,
-    ):
+    ), on_progress, 'rolling_windows', total=len(window_end_positions)):
         start_position = end_position - window_size + 1
         window = _slice_rows(df, start_position, end_position + 1)
         valid_pairs = _select_valid_temporal_pairs(window, feature, target)
@@ -681,12 +698,14 @@ def rolling_temporal_association(
             valid_pairs,
             block_length=block_length,
             step=bootstrap_step,
+            **_progress_kwargs(on_progress, f'window/{end_position}'),
         )
         bootstrap_samples = moving_block_bootstrap(
             blocks,
             sample_size=window_size,
             n_bootstraps=n_bootstraps,
             random_state=window_random_state,
+            **_progress_kwargs(on_progress, f'window/{end_position}'),
         )
         bootstrap_estimates = [
             information_coefficient(
@@ -694,7 +713,7 @@ def rolling_temporal_association(
                 sample[target],
                 corr_method=corr_method,
             )
-            for sample in bootstrap_samples
+            for sample in _progress_iter(bootstrap_samples, on_progress, f'window/{end_position}/bootstrap_estimates')
         ]
 
         try:
@@ -742,6 +761,8 @@ def temporal_association_summary_table(
         symbol_col: str = 'symbol',
         feature_groups: dict[str, str] | None = None,
         continuity_col: str | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize bootstrap temporal-association diagnostics for one or more features.
@@ -782,6 +803,13 @@ def temporal_association_summary_table(
         Original integer observation positions. When supplied, MBB candidate
         blocks cannot cross gaps caused by prior filtering or missing values.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports features, blocks, sample allocation, and estimates.
+
     Returns
     -------
     pd.DataFrame | pl.DataFrame
@@ -792,6 +820,8 @@ def temporal_association_summary_table(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If feature_list is empty or contains duplicates, or if a downstream
         temporal association, resampling, bootstrap metric, or test input is
@@ -799,6 +829,7 @@ def temporal_association_summary_table(
     KeyError
         If required dataset columns are absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df or a downstream argument uses an unsupported type.
 
     Notes
@@ -816,6 +847,7 @@ def temporal_association_summary_table(
 
     reject_h0 and p_value are determined only by the Wald test.
     """
+    _validate_progress_callback(on_progress)
     if not feature_list:
         raise ValueError('feature_list must not be empty.')
 
@@ -824,7 +856,7 @@ def temporal_association_summary_table(
 
     rows = []
 
-    for feature in feature_list:
+    for feature in _progress_iter(feature_list, on_progress, 'features'):
         observed_association = temporal_association(
             df=df,
             feature=feature,
@@ -843,12 +875,14 @@ def temporal_association_summary_table(
         )
         blocks = generate_moving_blocks(
             valid_pairs, block_length, step, continuity=continuity,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         bootstrap_samples = moving_block_bootstrap(
             blocks,
             sample_size=len(valid_pairs),
             n_bootstraps=n_bootstraps,
             random_state=random_state,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         bootstrap_estimates = [
             information_coefficient(
@@ -856,7 +890,7 @@ def temporal_association_summary_table(
                 sample[target],
                 corr_method=corr_method,
             )
-            for sample in bootstrap_samples
+            for sample in _progress_iter(bootstrap_samples, on_progress, f'feature/{feature}/bootstrap_estimates')
         ]
         metrics = bootstrap_metrics(bootstrap_estimates, confidence_level)
         test_result = wald_temporal_association_test(
@@ -911,6 +945,8 @@ def partial_temporal_association_summary_table(
         feature_groups: dict[str, str] | None = None,
         min_n: int | None = None,
         continuity_col: str | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize controlled temporal associations for one or more features.
@@ -954,6 +990,13 @@ def partial_temporal_association_summary_table(
         Original integer observation positions. When supplied, MBB candidate
         blocks cannot cross gaps caused by prior filtering or missing values.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports features, blocks, sample allocation, and partial estimates.
+
     Returns
     -------
     pd.DataFrame | pl.DataFrame
@@ -962,14 +1005,18 @@ def partial_temporal_association_summary_table(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     KeyError
         If a selected column is absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If df or a downstream argument has an unsupported type.
     ValueError
         If feature_list, the temporal contract, the partial-correlation
         specification, or a resampling/test input is invalid.
     """
+    _validate_progress_callback(on_progress)
     if not feature_list:
         raise ValueError('feature_list must not be empty.')
     if len(set(feature_list)) != len(feature_list):
@@ -980,7 +1027,7 @@ def partial_temporal_association_summary_table(
         raise ValueError('feature_list must not contain covariate columns.')
 
     rows = []
-    for feature in feature_list:
+    for feature in _progress_iter(feature_list, on_progress, 'features'):
         observed_association = partial_temporal_association(
             df=df,
             feature=feature,
@@ -1003,12 +1050,14 @@ def partial_temporal_association_summary_table(
         )
         blocks = generate_moving_blocks(
             valid_observations, block_length, step, continuity=continuity,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         bootstrap_samples = moving_block_bootstrap(
             blocks,
             sample_size=len(valid_observations),
             n_bootstraps=n_bootstraps,
             random_state=random_state,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         bootstrap_estimates = [
             partial_correlation(
@@ -1019,7 +1068,7 @@ def partial_temporal_association_summary_table(
                 corr_method=corr_method,
                 min_n=min_n,
             )
-            for sample in bootstrap_samples
+            for sample in _progress_iter(bootstrap_samples, on_progress, f'feature/{feature}/bootstrap_estimates')
         ]
         metrics = bootstrap_metrics(bootstrap_estimates, confidence_level)
         test_result = wald_temporal_association_test(
@@ -1091,6 +1140,8 @@ def temporal_association_decay(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> TemporalAssociationDecayResult:
     """
     Compute the temporal-association decay curve of one feature.
@@ -1143,6 +1194,13 @@ def temporal_association_decay(
         False discovery rate for the horizon family.
     fdr_method : {'bh', 'by'}, default 'bh'
         Multiple-testing correction method.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports target/evaluation horizons, blocks, samples, and estimates.
+
     Returns
     -------
     TemporalAssociationDecayResult
@@ -1150,6 +1208,8 @@ def temporal_association_decay(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If the single-asset temporal contract, feature or target frame,
         horizons, MBB configuration, Wald test, or FDR configuration is
@@ -1157,6 +1217,7 @@ def temporal_association_decay(
     KeyError
         If a required feature, key, or generated target column is absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If DataFrame backends differ or target_fn returns an unsupported
         DataFrame type.
 
@@ -1165,6 +1226,7 @@ def temporal_association_decay(
     This is a full-sample horizon-persistence analysis. It is distinct from a
     rolling temporal-association diagnostic and does not construct windows.
     """
+    _validate_progress_callback(on_progress)
     _validate_df(df_feature, [time_col, symbol_col, feature])
     _validate_single_symbol(df_feature, symbol_col)
     _validate_time_order(df_feature, time_col)
@@ -1174,6 +1236,7 @@ def temporal_association_decay(
         target_data=target_data,
         horizons=horizons,
         target_fn=target_fn,
+        **_progress_kwargs(on_progress),
     )
     return _temporal_association_decay_from_target_frames(
         df_feature=df_feature,
@@ -1190,6 +1253,7 @@ def temporal_association_decay(
         feature_groups=feature_groups,
         fdr=fdr,
         fdr_method=fdr_method,
+        **_progress_kwargs(on_progress),
     )
 
 
@@ -1208,6 +1272,8 @@ def _temporal_association_decay_from_target_frames(
         feature_groups: dict[str, str] | None,
         fdr: float,
         fdr_method: Literal['bh', 'by'],
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> TemporalAssociationDecayResult:
     """
     Compute one feature's temporal-association decay from generated targets.
@@ -1243,6 +1309,13 @@ def _temporal_association_decay_from_target_frames(
         False discovery rate across horizons.
     fdr_method : {'bh', 'by'}
         FDR correction method.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports evaluation horizons and their bootstrap work.
+
     Returns
     -------
     TemporalAssociationDecayResult
@@ -1250,10 +1323,13 @@ def _temporal_association_decay_from_target_frames(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If a generated target or a downstream temporal-association calculation
         does not meet its required contract.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If feature and target frames use different DataFrame backends.
 
     Notes
@@ -1262,6 +1338,7 @@ def _temporal_association_decay_from_target_frames(
     and multi-feature public functions so one generated target frame can be
     reused for every feature.
     """
+    _validate_progress_callback(on_progress)
     feature_group = (
         feature_groups.get(feature, 'ungrouped')
         if feature_groups is not None
@@ -1273,10 +1350,10 @@ def _temporal_association_decay_from_target_frames(
     )
     rows = []
 
-    for (horizon, target_df), child_random_state in zip(
+    for (horizon, target_df), child_random_state in _progress_iter(zip(
             target_frames.items(),
             child_random_states,
-    ):
+    ), on_progress, 'horizons', total=len(target_frames)):
         target_col = get_feature_name(target_df, time_col, symbol_col)
         joined_df = join_feature_target_frames(
             feature_df=df_feature,
@@ -1304,6 +1381,7 @@ def _temporal_association_decay_from_target_frames(
             time_col=time_col,
             symbol_col=symbol_col,
             feature_groups={feature: feature_group},
+            **_progress_kwargs(on_progress, f'horizon/{horizon}'),
         )
         if isinstance(horizon_table, pd.DataFrame):
             row = horizon_table.iloc[0].to_dict()
@@ -1489,6 +1567,8 @@ def temporal_association_decay_summary_table(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> TemporalAssociationDecaySummaryTableResult:
     """
     Compute temporal-association decay diagnostics for multiple features.
@@ -1532,6 +1612,13 @@ def temporal_association_decay_summary_table(
         False discovery rate per feature across its horizons.
     fdr_method : {'bh', 'by'}, default 'bh'
         Multiple-testing correction method.
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports target horizons, features, and nested horizon/bootstrap work.
+
     Returns
     -------
     TemporalAssociationDecaySummaryTableResult
@@ -1539,12 +1626,15 @@ def temporal_association_decay_summary_table(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If feature_list, horizons, temporal data, MBB configuration, or a
         downstream statistic is invalid.
     KeyError
         If required feature, key, or target columns are absent.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If DataFrame backends differ.
 
     Notes
@@ -1552,6 +1642,7 @@ def temporal_association_decay_summary_table(
     This function does not perform rolling analysis. It evaluates one
     full-sample association per feature-horizon pair.
     """
+    _validate_progress_callback(on_progress)
     if not feature_list:
         raise ValueError('feature_list must not be empty.')
 
@@ -1567,11 +1658,12 @@ def temporal_association_decay_summary_table(
         target_data=target_data,
         horizons=horizons,
         target_fn=target_fn,
+        **_progress_kwargs(on_progress),
     )
 
     rows = []
     decay_results = {}
-    for feature in feature_list:
+    for feature in _progress_iter(feature_list, on_progress, 'features'):
         decay_result = _temporal_association_decay_from_target_frames(
             df_feature=df_features,
             feature=feature,
@@ -1587,6 +1679,7 @@ def temporal_association_decay_summary_table(
             feature_groups=feature_groups,
             fdr=fdr,
             fdr_method=fdr_method,
+            **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         decay_table = decay_result.table
         if isinstance(decay_table, pd.DataFrame):

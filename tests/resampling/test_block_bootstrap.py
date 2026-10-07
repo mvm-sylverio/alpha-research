@@ -14,6 +14,68 @@ from alpha_research.resampling.block_bootstrap import (
 )
 
 
+@pytest.mark.parametrize('backend', ['pandas_series', 'polars_series', 'pandas_frame', 'polars_frame'])
+def test_block_progress_retains_continuity_and_order(backend):
+    """Should report candidate filtering and retain only hand-verifiable contiguous blocks."""
+    data = {
+        'pandas_series': pd.Series([10, 20, 30, 40, 50]),
+        'polars_series': pl.Series([10, 20, 30, 40, 50]),
+        'pandas_frame': pd.DataFrame({'value': [10, 20, 30, 40, 50]}),
+        'polars_frame': pl.DataFrame({'value': [10, 20, 30, 40, 50]}),
+    }[backend]
+    events = []
+    blocks = generate_moving_blocks(data, 2, continuity=[0, 1, 4, 5, 6],
+                                    on_progress=lambda *event: events.append(event))
+    values = [block['value'] if 'frame' in backend else block for block in blocks]
+    assert [value.to_list() for value in values] == [[10, 20], [30, 40], [40, 50]]
+    assert ('candidate_blocks', 4, 4) in events
+    assert events[-1] == ('moving_blocks', 3, 3)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_bootstrap_observation_preserves_draw_order_and_stops_future_draws(backend, monkeypatch):
+    """Should keep predetermined RNG draws intact and never draw a sample after cancellation."""
+    # Predetermined block choices form an independent, hand-verifiable oracle.
+    blocks = [pd.Series([10, 20]), pd.Series([30, 40])]
+    if backend == 'polars':
+        blocks = [pl.Series(block) for block in blocks]
+    draws = []
+    seeds = []
+    choices = [[1, 0], [0, 1], [1, 1]]
+
+    class FixedGenerator:
+        """Supply predetermined choices instead of reproducing the production RNG."""
+
+        def integers(self, low, high, size):
+            """Should record one original draw and return its predefined block indices."""
+            assert (low, high, size) == (0, 2, 2)
+            draws.append(choices[len(draws)])
+            return np.array(draws[-1])
+
+    monkeypatch.setattr('alpha_research.resampling.block_bootstrap.np.random.default_rng',
+                        lambda seed: seeds.append(seed) or FixedGenerator())
+    events = []
+    samples = moving_block_bootstrap(blocks, 3, 3, 17, on_progress=lambda *event: events.append(event))
+    assert [sample.to_list() for sample in samples] == [[30, 40, 10], [10, 20, 30], [30, 40, 30]]
+    assert events[-1] == ('bootstrap_samples', 3, 3)
+    assert seeds == [17]
+    draws.clear()
+    exception = TypeError('cancel sampling')
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if done == 1 else None
+    with pytest.raises(TypeError) as caught:
+        moving_block_bootstrap(blocks, 3, 3, 17, on_progress=callback)
+    assert caught.value is exception
+    assert draws == [[1, 0]]
+
+
+@pytest.mark.parametrize('function', [generate_moving_blocks, moving_block_bootstrap])
+def test_resampling_rejects_invalid_observers_before_work(function):
+    """Should validate observers before allocating blocks or bootstrap samples."""
+    args = (pd.Series([1, 2]), 1) if function is generate_moving_blocks else ([pd.Series([1, 2])], 2, 2)
+    with pytest.raises(TypeError, match='on_progress'):
+        function(*args, on_progress=12)
+
+
 # ------------------------------------------------------
 # fixtures
 # ------------------------------------------------------

@@ -20,6 +20,188 @@ from alpha_research.evaluation.partial import partial_correlation
 
 
 # ------------------------------------------------------
+# Optional observation and cooperative cancellation
+# ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('method', ['pearson', 'spearman'])
+def test_compute_ic_retains_known_native_values(cross_section_df_pandas, backend, method):
+    """Should retain analytically known correlations of +1 and -1 using native grouped operations."""
+    frame = cross_section_df_pandas if backend == 'pandas' else pl.from_pandas(cross_section_df_pandas)
+    result = compute_ic(frame, 'feature', 'target', method)
+    assert result['ic'].to_list() == pytest.approx([1.0, -1.0])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_preserves_undefined_date_semantics(backend):
+    """Should preserve native handling of undefined constant cross-sections."""
+    frame = pd.DataFrame({'time': [1, 1, 2, 2], 'feature': [1., 2., 1., 1.], 'target': [1., 2., 3., 4.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    result = compute_ic(frame, 'feature', 'target')
+    assert result['ic'][0] == pytest.approx(1.0)
+    # Pandas omits NaN; Polars retains its established native NaN semantics.
+    if backend == 'polars':
+        assert np.isnan(result['ic'][1])
+    else:
+        assert len(result) == 1
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_reports_and_cancels_by_date(partial_ic_data_pandas, backend, monkeypatch):
+    """Should stop partial IC between dates without entering the next residualization."""
+    frame = partial_ic_data_pandas if backend == 'pandas' else pl.from_pandas(partial_ic_data_pandas)
+    processed = []
+    exception = ValueError('cancel')
+    monkeypatch.setattr('alpha_research.evaluation.ic.partial_correlation',
+                        lambda *args, **kwargs: processed.append(args[0]) or float('nan'))
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if done == 1 else None
+    with pytest.raises(ValueError) as caught:
+        partial_information_coefficient(frame, 'feature', 'target', 'covariate_a', on_progress=callback)
+    assert caught.value is exception
+    assert len(processed) == 1
+
+
+def test_summary_reports_ic_progress_by_feature(cross_section_df_pandas):
+    """Should report existing feature-loop counts without adding date-loop events."""
+    frame = cross_section_df_pandas.assign(second=cross_section_df_pandas['feature'] * -1)
+    events = []
+    result = ic_summary_table(frame, ['feature', 'second'], 'target', on_progress=lambda *event: events.append(event))
+    assert result.ic_frames['feature']['ic'].tolist() == pytest.approx([1, -1])
+    assert result.ic_frames['second']['ic'].tolist() == pytest.approx([-1, 1])
+    assert {event[0] for event in events} == {'features'}
+    assert {event[1] for event in events} == {0, 1, 2}
+    assert events[-1] == ('features', 2, 2)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('exception_type', [ValueError, TypeError, RuntimeError])
+def test_summary_cancels_between_atomic_ic_features(cross_section_df_pandas, backend, exception_type, monkeypatch):
+    """Should finish the first grouped IC and stop before calculating a second feature."""
+    frame = cross_section_df_pandas.assign(second=-cross_section_df_pandas['feature'])
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    original = compute_ic
+    computed = []
+    def grouped_ic(df, feature, target, corr_method, date_column):
+        """Should observe native calls using only their original statistical arguments."""
+        computed.append(feature)
+        return original(df, feature, target, corr_method, date_column)
+    monkeypatch.setattr('alpha_research.evaluation.ic.compute_ic', grouped_ic)
+    exception = exception_type('cancel')
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if done == 1 else None
+    with pytest.raises(exception_type) as caught:
+        ic_summary_table(frame, ['feature', 'second'], 'target', on_progress=callback)
+    assert caught.value is exception
+    assert computed == ['feature']
+
+
+def test_target_generation_cancellation_preserves_sorted_horizons(monkeypatch):
+    """Should generate only the first sorted horizon before cancellation without regenerating IDs or outputs."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'value': [1., 2.]})
+    generated = []
+    exception = RuntimeError('cancel')
+    target_fn = lambda data, horizon: generated.append(horizon) or data.copy()
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if done == 1 else None
+    with pytest.raises(RuntimeError) as caught:
+        _generate_target_frames(frame, frame, [3, 1, 2], target_fn, on_progress=callback)
+    assert caught.value is exception
+    assert generated == [1]
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_decay_progress_preserves_shared_targets_and_horizons(
+        decay_features_df_pandas, decay_target_data_pandas, backend):
+    """Should generate targets once and observe existing feature/horizon loops without changing output."""
+    features = decay_features_df_pandas
+    targets = decay_target_data_pandas
+    if backend == 'polars':
+        features, targets = pl.from_pandas(features), pl.from_pandas(targets)
+    generated = []
+    target_fn = lambda frame, horizon: generated.append(horizon) or frame[['time', 'symbol', f'target_{horizon}']]
+    args = {'df_features': features, 'feature_list': ['feature_a', 'feature_b'], 'target_data': targets,
+                'horizons': [2, 1], 'target_fn': target_fn}
+    expected = ic_decay_summary_table(**args)
+    generated.clear()
+    events = []
+    result = ic_decay_summary_table(**args, on_progress=lambda *event: events.append(event))
+    assert generated == [1, 2]
+    for feature in ['feature_a', 'feature_b']:
+        if backend == 'pandas':
+            pd.testing.assert_frame_equal(result.decay_results[feature].table, expected.decay_results[feature].table)
+        else:
+            assert result.decay_results[feature].table.equals(expected.decay_results[feature].table)
+        assert (f'feature/{feature}/horizons', 2, 2) in events
+    assert {phase for phase, _, _ in events} == {'target_horizons', 'features',
+        'feature/feature_a/horizons', 'feature/feature_b/horizons'}
+    assert events[-1] == ('features', 2, 2)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_observation_preserves_analytical_residuals(backend):
+    """Should retain correlations of +1 and -1 after removing an orthogonal control."""
+    # z is orthogonal to r and to the intercept. Residuals are exactly r and +/-r.
+    z = [-1., -1., 1., 1.]
+    r = [-1., 1., -1., 1.]
+    frame = pd.DataFrame({'time': [1] * 4 + [2] * 4, 'control': z * 2,
+                          'feature': [a + b for a, b in zip(z, r)] * 2,
+                          'target': [2 * a + b for a, b in zip(z, r)] + [2 * a - b for a, b in zip(z, r)]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    events = []
+    result = partial_information_coefficient(frame, 'feature', 'target', 'control', corr_method='pearson',
+                                             on_progress=lambda *event: events.append(event))
+    assert result['partial_ic'].to_list() == pytest.approx([1., -1.])
+    assert events[-1] == ('partial_ic_dates', 2, 2)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('method,expected', [('spearman', 5 / 6), ('pearson', 2 / (5.5 ** 0.5))])
+def test_native_ic_retains_ties_custom_columns_and_utc(backend, method, expected):
+    """Should retain hand-derived tied correlations, UTC keys, custom output names, and untouched input."""
+    # Centered average ranks have dot product 3.75 and squared norms 4.5;
+    # centered raw values have dot product 2 and squared norms 2.75 and 2.
+    frame = pd.DataFrame({'date': pd.to_datetime(['2024-01-02'] * 4 + ['2024-01-01'] * 4, utc=True),
+                          'x': [1., 1., 2., 3.] * 2, 'y': [1., 2., 2., 3.] * 2})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    before = frame.copy(deep=True) if backend == 'pandas' else frame.clone()
+    result = compute_ic(frame, 'x', 'y', method, 'date', 'association')
+    assert result['association'].to_list() == pytest.approx([expected, expected])
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(frame, before)
+    else:
+        assert frame.equals(before)
+
+
+@pytest.mark.parametrize('method', ['pearson', 'spearman'])
+@pytest.mark.parametrize('values', [[], [None, None], [float('nan'), 2.], [1., 1.], [1., 2.]])
+def test_polars_ic_preserves_native_null_and_nan_semantics(method, values):
+    """Should retain validation and native handling of nulls, NaNs, and constant values."""
+    frame = pl.DataFrame({'time': [1] * len(values), 'x': values, 'y': [1., 2.][:len(values)]},
+                          schema={'time': pl.Int64, 'x': pl.Float64, 'y': pl.Float64})
+    if not values or all(value is None for value in values):
+        with pytest.raises(ValueError):
+            compute_ic(frame, 'x', 'y', method)
+        return
+    result = compute_ic(frame, 'x', 'y', method)
+    if np.isnan(values[0]) and method == 'spearman':
+        # Native NaN ordering ranks NaN above 2, opposite to the target order.
+        assert result['ic'].to_list() == pytest.approx([-1.0])
+    elif np.isnan(values[0]) or values[0] == values[1]:
+        assert np.isnan(result['ic'][0])
+    else:
+        assert result['ic'].to_list() == pytest.approx([1.0])
+
+
+def test_polars_ic_preserves_empty_joint_pairs_schema():
+    """Should retain the native empty schema when individually valid columns have no joint pairs."""
+    frame = pl.DataFrame({'time': [1, 2], 'x': [None, 2.], 'y': [1., None]})
+    result = compute_ic(frame, 'x', 'y')
+    assert result.schema == {'time': pl.Int64, 'ic': pl.Float64}
+    assert result.is_empty()
+
+
+# ------------------------------------------------------
 # fixtures
 # ------------------------------------------------------
 @pytest.fixture

@@ -14,6 +14,37 @@ from alpha_research.evaluation.descriptive_statistics import (
 from alpha_research.evaluation.timeseries import rolling_temporal_association
 
 
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('group_by,total', [(None, 1), ('symbol', 2), ('time', 5)])
+def test_distribution_progress_retains_known_group_counts(distribution_frame_pandas, backend, group_by, total):
+    """Should report exact group counts while preserving known asset means and existing output."""
+    frame = distribution_frame_pandas if backend == 'pandas' else pl.from_pandas(distribution_frame_pandas)
+    events = []
+    expected = distribution_summary(frame, group_by=group_by)
+    result = distribution_summary(frame, group_by=group_by, on_progress=lambda *event: events.append(event))
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(result, expected)
+    else:
+        assert result.equals(expected)
+    if group_by == 'symbol':
+        assert result['mean'].to_list() == [2.0, 30.0]
+    assert events[0] == ('distribution_groups', 0, total)
+    assert events[-1] == ('distribution_groups', total, total)
+
+
+def test_distribution_cancels_between_assets(distribution_frame_pandas, monkeypatch):
+    """Should stop before summarizing a second asset and propagate the original exception."""
+    processed = []
+    exception = ValueError('cancel')
+    monkeypatch.setattr('alpha_research.evaluation.descriptive_statistics._summarize_values',
+                        lambda values: processed.append(values) or {'mean': 2.0})
+    callback = lambda phase, done, total: (_ for _ in ()).throw(exception) if done == 1 else None
+    with pytest.raises(ValueError) as caught:
+        distribution_summary(distribution_frame_pandas, group_by='symbol', on_progress=callback)
+    assert caught.value is exception
+    assert len(processed) == 1
+
+
 @pytest.fixture
 def distribution_frame_pandas():
     """Create two assets with hand-verifiable values at five dates."""

@@ -15,6 +15,48 @@ from alpha_research.resampling.convergence import (
 )
 
 
+def test_convergence_progress_respects_early_confirmation():
+    """Should count only two evaluated levels and preserve the original maximum-B generation contract."""
+    calls = []
+    prefixes = []
+    events = []
+    bootstrap = lambda n_bootstraps, random_state: calls.append((n_bootstraps, random_state)) or list(range(n_bootstraps))
+    metrics = lambda values: prefixes.append(len(values)) or {'value': 1.0}
+    result = monte_carlo_error(bootstrap, metrics, [2, 4, 8], {'value': 0.0}, n_runs=2,
+                              random_state=17, on_progress=lambda *event: events.append(event))
+    assert result.converged
+    assert result.recommended_n_bootstraps == 2
+    assert [count for count, _ in calls] == [8, 8]
+    assert tuple(seed for _, seed in calls) == result.run_random_states
+    assert prefixes == [2, 2, 4, 4]
+    assert ('convergence_runs', 2, 2) in events
+    assert events[-1] == ('convergence_levels', 2, 3)
+    assert ('convergence_levels', 3, 3) not in events
+
+
+@pytest.mark.parametrize('phase', ['convergence_runs', 'convergence_levels', 'convergence_metrics'])
+@pytest.mark.parametrize('exception_type', [ValueError, TypeError, RuntimeError])
+def test_convergence_propagates_callback_exceptions(phase, exception_type):
+    """Should stop each coordination loop without retrying bootstrap or swallowing metric observation errors."""
+    generated = []
+    measured = []
+    exception = exception_type('cancel')
+    bootstrap = lambda n_bootstraps, random_state: generated.append(n_bootstraps) or list(range(n_bootstraps))
+    metrics = lambda values: measured.append(len(values)) or {'value': 1.0}
+    callback = lambda current, done, total: (_ for _ in ()).throw(exception) if current == phase and done == 1 else None
+    with pytest.raises(exception_type) as caught:
+        monte_carlo_error(bootstrap, metrics, [2, 4, 8], {'value': 0.0}, n_runs=2,
+                          random_state=17, on_progress=callback)
+    assert caught.value is exception
+    if phase == 'convergence_runs':
+        assert generated == [8]
+        assert measured == []
+    elif phase == 'convergence_levels':
+        assert measured == [2, 2]
+    else:
+        assert measured == [2]
+
+
 def _prefix_consistent_bootstrap(
         n_bootstraps: int,
         random_state: int,

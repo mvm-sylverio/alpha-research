@@ -428,6 +428,41 @@ the requested output unit (`fraction`, `percent`, or `bps`). The library does
 not estimate market costs or infer trade counts. These descriptive contrasts
 and margins are not a backtest or a realized profit calculation.
 
+## Optional progress and cooperative cancellation
+
+IC summary/decay functions, partial IC and its summary, temporal summaries/decay,
+rolling temporal association, relationship summaries/uncertainty, grouped
+distribution summaries, moving-block generation/bootstrap, and Monte Carlo
+convergence accept a keyword-only `on_progress=None` argument.
+
+```python
+def observe(phase, completed, total):
+    if stop_requested:
+        raise RuntimeError('Research cancelled by the caller.')
+    print(phase, completed, total)
+
+result = ic_summary_table(
+    research_frame, ['signal'], 'fwd_ret_5', on_progress=observe,
+)
+```
+
+Observers run synchronously before/after work units. Exceptions propagate
+unchanged; the library does not require a cancellation exception, scheduler,
+storage system, or UI. Counts describe processed local units (including skipped
+or undefined units), not elapsed time or an overall completion percentage.
+Nested phases identify features, horizons, and windows. Checkpoints may repeat
+the current count; `total=None` means unknown, and zero denotes empty work.
+Observers should be lightweight and must not return asynchronous/lazy work.
+Use ordinary exceptions for cancellation; `StopIteration` has Python iterator
+semantics and becomes `RuntimeError` inside the observed loops.
+
+`compute_ic` and its Pandas/Polars implementations retain their native grouped
+operations and do not accept an observer. Ordinary IC summaries/decay expose
+their existing feature/horizon loops; partial IC also observes its existing
+date loop. Cancellation waits for the current indivisible statistical operation
+to return. Callbacks neither expose partial analysis results nor save internal
+state. Existing positional arguments, results, and random streams are retained.
+
 ## Scope
 
 This project documents implemented research capabilities rather than a fixed
