@@ -12,6 +12,11 @@ from alpha_research._utils import (
     _validate_unique_keys,
 )
 from alpha_research.features.schema import get_feature_name
+from alpha_research.progress import (
+    ProgressCallback,
+    _progress_iter,
+    _validate_progress_callback,
+)
 
 __all__ = ['distribution_summary', 'rolling_distribution_summary']
 
@@ -193,6 +198,8 @@ def distribution_summary(
         value_col: str | None = None,
         time_col: str = 'time',
         symbol_col: str = 'symbol',
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """Summarize a feature or target overall, by asset, or cross-sectionally.
 
@@ -209,6 +216,13 @@ def distribution_summary(
     time_col, symbol_col : str
         Names of the temporal and asset key columns.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports groups/dates/assets; individual reductions remain atomic.
+
     Returns
     -------
     pd.DataFrame | pl.DataFrame
@@ -217,13 +231,17 @@ def distribution_summary(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If the frame or value column has an unsupported type.
     KeyError
         If a required column is absent.
     ValueError
         If the frame or grouping specification is invalid.
     """
+    _validate_progress_callback(on_progress)
     if group_by not in (None, symbol_col, time_col):
         raise ValueError('group_by must be None, symbol_col, or time_col.')
     selected_frame, value_col = _prepare_value_frame(
@@ -239,7 +257,8 @@ def distribution_summary(
         else (group for _, group in polars_frame.group_by(group_by, maintain_order=True))
     )
     rows = []
-    for group in groups:
+    total = (1 if group_by is None else polars_frame[group_by].n_unique()) if on_progress is not None else None
+    for group in _progress_iter(groups, on_progress, 'distribution_groups', total=total):
         row = {'value_name': value_col, **_summarize_values(group[value_col])}
         if group_by is not None:
             row = {group_by: group[group_by][0], **row}

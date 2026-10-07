@@ -7,6 +7,10 @@ import polars as pl
 
 from alpha_research._utils import _validate_positive_integer
 
+from alpha_research.progress import (
+    ProgressCallback, _progress_iter, _validate_progress_callback,
+)
+
 
 __all__ = [
     'generate_moving_blocks',
@@ -47,6 +51,8 @@ def generate_moving_blocks(
         block_length: int,
         step: int = 1,
         continuity: Sequence[int] | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> list[ResamplingData]:
     """
     Generate contiguous candidate blocks for Moving Block Bootstrap.
@@ -65,6 +71,13 @@ def generate_moving_blocks(
         Strictly increasing original observation positions. When supplied,
         candidate blocks cannot cross a gap in these positions.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports continuity filtering and block allocation separately.
+
     Returns
     -------
     list[pd.Series | pl.Series | pd.DataFrame | pl.DataFrame]
@@ -73,7 +86,10 @@ def generate_moving_blocks(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If data is not a supported Series or DataFrame.
     ValueError
         If block_length or step is not a positive integer, or block_length is
@@ -81,6 +97,7 @@ def generate_moving_blocks(
     TypeError
         If continuity does not contain integer positions.
     """
+    _validate_progress_callback(on_progress)
     _validate_resampling_data(data)
     _validate_positive_integer(block_length, 'block_length')
     _validate_positive_integer(step, 'step')
@@ -115,7 +132,7 @@ def generate_moving_blocks(
     starts = range(0, n_observations - block_length + 1, step)
     if continuity is not None:
         starts = [
-            start for start in starts
+            start for start in _progress_iter(starts, on_progress, 'candidate_blocks')
             if positions[start + block_length - 1] - positions[start]
             == block_length - 1
         ]
@@ -126,7 +143,7 @@ def generate_moving_blocks(
         data.iloc[start:start + block_length]
         if isinstance(data, (pd.Series, pd.DataFrame))
         else data.slice(start, block_length)
-        for start in starts
+        for start in _progress_iter(starts, on_progress, 'moving_blocks')
     ]
 
 
@@ -214,6 +231,8 @@ def moving_block_bootstrap(
         sample_size: int,
         n_bootstraps: int,
         random_state: int | None = None,
+        *,
+        on_progress: ProgressCallback | None = None,
 ) -> list[ResamplingData]:
     """
     Generate Moving Block Bootstrap samples from candidate blocks.
@@ -233,6 +252,13 @@ def moving_block_bootstrap(
     random_state : int | None, default None
         Seed for reproducible block sampling.
 
+    on_progress : callable | None, default None
+        Optional synchronous observer called with (phase, completed, total).
+        Counts describe processed local units, including skipped units;
+        total may be None. Checkpoints may repeat a count. Exceptions
+        propagate unchanged, allowing cooperative cancellation.
+        Reports sample allocation; the return value remains a list.
+
     Returns
     -------
     list[pd.Series | pl.Series | pd.DataFrame | pl.DataFrame]
@@ -240,12 +266,16 @@ def moving_block_bootstrap(
 
     Raises
     ------
+    Exception
+        Propagates observer exceptions unchanged.
     ValueError
         If blocks are invalid, or sample_size or n_bootstraps is not a
         positive integer.
     TypeError
+        If on_progress is not a synchronous callable or None.
         If blocks contain unsupported or mixed data types.
     """
+    _validate_progress_callback(on_progress)
     _validate_positive_integer(sample_size, 'sample_size')
     _validate_positive_integer(n_bootstraps, 'n_bootstraps')
 
@@ -261,7 +291,7 @@ def moving_block_bootstrap(
     n_blocks = int(np.ceil(sample_size / block_length))
     samples = []
 
-    for _ in range(n_bootstraps):
+    for _ in _progress_iter(range(n_bootstraps), on_progress, 'bootstrap_samples'):
         sampled_indices = rng.integers(0, len(blocks), size=n_blocks)
         sampled_blocks = [blocks[index] for index in sampled_indices]
         concatenated = _concatenate_blocks(sampled_blocks)
