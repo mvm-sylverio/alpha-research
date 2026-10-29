@@ -101,9 +101,10 @@ def _select_valid_temporal_pairs(
         feature: str,
         target: str,
         covariates: list[str] | None = None,
+        *, check_all_missing: bool = True,
 ) -> pd.DataFrame | pl.DataFrame:
     """
-    Select paired non-missing feature and target observations.
+    Select paired finite feature and target observations.
 
     Parameters
     ----------
@@ -117,32 +118,68 @@ def _select_valid_temporal_pairs(
     covariates : list[str] | None, default None
         Optional covariate columns that must be observed alongside the feature
         and target.
+    check_all_missing : bool, default True
+        Reject entirely missing columns in a complete input. Rolling callers
+        use False for local windows after validating the complete series.
 
     Returns
     -------
     pd.DataFrame | pl.DataFrame
-        Selected columns, excluding rows where any selected value is null or
-        NaN. The input backend and original row order are preserved.
+        Selected columns, excluding rows where any selected value is null,
+        NaN, or infinite. The input backend and original row order are
+        preserved.
 
     Raises
     ------
     KeyError
         If feature or target is not a column of df.
     TypeError
-        If df is not a Pandas or Polars DataFrame.
+        If df is not a Pandas or Polars DataFrame or the flag is not boolean.
+    ValueError
+        If df is empty, an entirely missing column is rejected, or a selected
+        column cannot be converted to numeric values.
     """
     columns = [feature, target, *(covariates or [])]
-    _validate_df(df, columns)
+    _validate_df(df, columns, check_all_missing=check_all_missing)
 
-    if isinstance(df, pd.DataFrame):
-        return df[columns].dropna()
-
-    return (
-        df
-        .select(columns)
-        .drop_nulls(columns)
-        .drop_nans(columns)
+    selected = (
+        df[columns].dropna()
+        if isinstance(df, pd.DataFrame)
+        else df.select(columns).drop_nulls(columns)
     )
+    if isinstance(selected, pd.DataFrame):
+        has_non_numeric = any(
+            not pd.api.types.is_numeric_dtype(selected[column])
+            or pd.api.types.is_bool_dtype(selected[column])
+            for column in columns
+        )
+    else:
+        has_non_numeric = any(
+            not selected.schema[column].is_numeric()
+            or selected.schema[column] == pl.Boolean
+            for column in columns
+        )
+    if has_non_numeric:
+        raise ValueError(
+            'feature, target, covariates, and continuity must contain numeric values.',
+        )
+
+    try:
+        values = (
+            selected.to_numpy(dtype=float)
+            if isinstance(selected, pd.DataFrame)
+            else selected.to_numpy().astype(float, copy=False)
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            'feature, target, covariates, and continuity must contain numeric values.',
+        ) from error
+
+    finite_rows = np.isfinite(values).all(axis=1)
+    if isinstance(selected, pd.DataFrame):
+        return selected.loc[finite_rows]
+
+    return selected.filter(pl.Series(finite_rows))
 
 
 def temporal_association(
@@ -196,9 +233,10 @@ def temporal_association(
 
     Notes
     -----
-    Missing feature or target values are removed only after the temporal data
-    contract has been validated. This function reports a point association;
-    bootstrap confidence intervals and purged validation are separate steps.
+    Missing or non-finite feature or target values are removed jointly only
+    after the temporal data contract has been validated. This function reports
+    a point association; bootstrap confidence intervals and purged validation
+    are separate steps.
     """
     _validate_df(df, [time_col, symbol_col, feature, target])
     _validate_single_symbol(df, symbol_col)
@@ -360,6 +398,251 @@ def _rolling_random_states(
     ]
 
 
+def _validate_feature_list(feature_list: list[str]) -> None:
+    """
+    Validate feature names supplied to a multi-feature temporal analysis.
+
+    Parameters
+    ----------
+    feature_list : list[str]
+        Non-empty list of unique, non-empty feature-column names.
+
+    Returns
+    -------
+    None
+        Returns None when feature_list satisfies the public API contract.
+
+    Raises
+    ------
+    TypeError
+        If feature_list is not a list or contains a non-string value.
+    ValueError
+        If feature_list is empty, contains an empty name, or has duplicates.
+    """
+    if not isinstance(feature_list, list):
+        raise TypeError('feature_list must be a list of strings.')
+    if not feature_list:
+        raise ValueError('feature_list must not be empty.')
+    if not all(isinstance(feature, str) for feature in feature_list):
+        raise TypeError('feature_list must be a list of strings.')
+    if any(not feature for feature in feature_list):
+        raise ValueError('feature_list must not contain empty names.')
+    if len(set(feature_list)) != len(feature_list):
+        raise ValueError('feature_list must not contain duplicates.')
+
+
+def _validate_summary_bootstrap_configuration(
+        block_length: int,
+        n_bootstraps: int,
+        step: int,
+        confidence_level: float,
+        random_state: int | None,
+) -> None:
+    """
+    Validate bootstrap arguments used by full-sample temporal summaries.
+
+    Parameters
+    ----------
+    block_length : int
+        Positive moving-block length.
+    n_bootstraps : int
+        Number of bootstrap estimates. At least two are required to estimate
+        the standard error used by the Wald test.
+    step : int
+        Positive increment between candidate block starts.
+    confidence_level : float
+        Confidence level strictly between zero and one.
+    random_state : int | None
+        Optional integer seed.
+
+    Returns
+    -------
+    None
+        Returns None when every argument is valid.
+
+    Raises
+    ------
+    TypeError
+        If random_state is neither an integer nor None.
+    ValueError
+        If a sizing argument or confidence_level is invalid.
+    """
+    _validate_positive_integer(block_length, 'block_length')
+    _validate_positive_integer(n_bootstraps, 'n_bootstraps')
+    _validate_positive_integer(step, 'step')
+
+    if n_bootstraps < 2:
+        raise ValueError('n_bootstraps must be at least two for Wald inference.')
+
+    if (
+            not isinstance(confidence_level, (int, float, np.integer, np.floating))
+            or isinstance(confidence_level, bool)
+            or not 0 < confidence_level < 1
+    ):
+        raise ValueError('confidence_level must be strictly between 0 and 1.')
+
+    if random_state is not None and (
+            not isinstance(random_state, (int, np.integer))
+            or isinstance(random_state, bool)
+    ):
+        raise TypeError('random_state must be an integer or None.')
+
+
+def _validate_continuity_column(
+        continuity_col: str | None,
+        reserved_columns: list[str],
+) -> None:
+    """
+    Validate an optional original-position column name.
+
+    Parameters
+    ----------
+    continuity_col : str | None
+        Column containing original integer observation positions.
+    reserved_columns : list[str]
+        Columns whose analytical roles must not overlap continuity.
+
+    Returns
+    -------
+    None
+        Returns None when the optional column name is valid.
+
+    Raises
+    ------
+    TypeError
+        If continuity_col is neither a string nor None.
+    ValueError
+        If continuity_col is empty or overlaps an analytical column.
+    """
+    if continuity_col is None:
+        return
+    if not isinstance(continuity_col, str):
+        raise TypeError('continuity_col must be a string or None.')
+    if not continuity_col:
+        raise ValueError('continuity_col must not be empty.')
+    if continuity_col in reserved_columns:
+        raise ValueError(
+            'continuity_col must be distinct from temporal and analytical columns.',
+        )
+
+
+def _validate_rolling_temporal_association_frame(
+        rolling_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Validate and normalize one rolling temporal-association result frame.
+
+    Parameters
+    ----------
+    rolling_frame : pd.DataFrame
+        Non-empty Pandas frame with the public rolling-result schema.
+
+    Returns
+    -------
+    pd.DataFrame
+        A copy with diagnostic columns normalized to numeric values.
+
+    Raises
+    ------
+    ValueError
+        If metadata, ordering, statuses, diagnostic bounds, or status-specific
+        missingness are inconsistent.
+    TypeError
+        If rolling_frame is not a Pandas DataFrame.
+    """
+    if not isinstance(rolling_frame, pd.DataFrame):
+        raise TypeError('rolling_frame must be a Pandas DataFrame.')
+
+    metadata_columns = [
+        'symbol', 'feature', 'target', 'corr_method', 'bootstrap_method',
+    ]
+    for column in metadata_columns:
+        if rolling_frame[column].isna().any() or rolling_frame[column].nunique() != 1:
+            raise ValueError(
+                f'{column} must contain exactly one non-missing value.',
+            )
+
+    if rolling_frame['corr_method'].iloc[0] not in {'pearson', 'spearman'}:
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
+    if rolling_frame['bootstrap_method'].iloc[0] != 'moving_block':
+        raise ValueError("bootstrap_method must be 'moving_block'.")
+
+    valid_statuses = {
+        'ok', 'missing_pairs', 'undefined_association', 'undefined_bootstrap',
+    }
+    if rolling_frame['status'].isna().any() or not rolling_frame['status'].isin(
+            valid_statuses,
+    ).all():
+        raise ValueError('status contains an unsupported rolling computation state.')
+
+    _validate_time_order(rolling_frame, 'window_end')
+
+    numeric_columns = [
+        'association', 'bootstrap_ci_lower', 'bootstrap_ci_upper',
+        'bootstrap_pct_positive',
+    ]
+    numeric_frame = rolling_frame[numeric_columns].apply(
+        pd.to_numeric,
+        errors='coerce',
+    )
+    invalid_numeric = (
+        rolling_frame[numeric_columns].notna()
+        & numeric_frame.isna()
+    ).any().any()
+    if invalid_numeric:
+        raise ValueError('rolling diagnostic columns must contain numeric values.')
+
+    normalized = rolling_frame.copy()
+    normalized[numeric_columns] = numeric_frame
+    ok = normalized['status'] == 'ok'
+    if ok.any():
+        ok_values = normalized.loc[ok, numeric_columns]
+        if not np.isfinite(ok_values.to_numpy(dtype=float)).all():
+            raise ValueError(
+                "rows with status 'ok' must contain finite rolling diagnostics.",
+            )
+        bounded_columns = [
+            'association', 'bootstrap_ci_lower', 'bootstrap_ci_upper',
+        ]
+        if (ok_values[bounded_columns].abs() > 1.0 + 1e-12).any().any():
+            raise ValueError(
+                'association and bootstrap interval bounds must be within [-1, 1].',
+            )
+        if (ok_values['bootstrap_ci_lower'] > ok_values['bootstrap_ci_upper']).any():
+            raise ValueError(
+                'bootstrap_ci_lower must not exceed bootstrap_ci_upper.',
+            )
+        if not ok_values['bootstrap_pct_positive'].between(0.0, 1.0).all():
+            raise ValueError('bootstrap_pct_positive must be between zero and one.')
+
+    missing_or_undefined = normalized['status'].isin(
+        ['missing_pairs', 'undefined_association'],
+    )
+    if normalized.loc[missing_or_undefined, numeric_columns].notna().any().any():
+        raise ValueError(
+            'missing_pairs and undefined_association rows must not contain '
+            'rolling diagnostics.',
+        )
+
+    undefined_bootstrap = normalized['status'] == 'undefined_bootstrap'
+    if undefined_bootstrap.any():
+        undefined_values = normalized.loc[undefined_bootstrap, numeric_columns]
+        bootstrap_columns = [
+            'bootstrap_ci_lower', 'bootstrap_ci_upper',
+            'bootstrap_pct_positive',
+        ]
+        if (
+                not np.isfinite(undefined_values['association']).all()
+                or undefined_values[bootstrap_columns].notna().any().any()
+        ):
+            raise ValueError(
+                'undefined_bootstrap rows require a finite association and '
+                'missing bootstrap diagnostics.',
+            )
+
+    return normalized
+
+
 def _rolling_summary_pandas(
         rolling_frame: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -472,6 +755,16 @@ def summarize_rolling_temporal_association(
         One row with descriptive rolling diagnostics. The output backend
         matches rolling_frame.
 
+    Raises
+    ------
+    ValueError
+        If metadata, window endpoints, statuses, or diagnostics are
+        inconsistent.
+    KeyError
+        If a required result column is absent.
+    TypeError
+        If rolling_frame is not a Pandas or Polars DataFrame.
+
     Notes
     -----
     Consecutive rolling windows overlap by construction. Therefore, the
@@ -493,6 +786,7 @@ def summarize_rolling_temporal_association(
         if isinstance(rolling_frame, pd.DataFrame)
         else rolling_frame.to_pandas()
     )
+    pandas_frame = _validate_rolling_temporal_association_frame(pandas_frame)
     summary = _rolling_summary_pandas(pandas_frame)
 
     if isinstance(rolling_frame, pd.DataFrame):
@@ -599,6 +893,9 @@ def rolling_temporal_association(
     deleting internal gaps and treating temporally separated observations as
     adjacent MBB data.
 
+    An entirely missing local window receives the same status. Required columns
+    with no observations anywhere in the complete input remain invalid.
+
     The interval is a percentile bootstrap interval, suitable for visualizing
     local bootstrap uncertainty. The bootstrap sign proportion is a
     directional-stability diagnostic, not a p-value. No pointwise hypothesis
@@ -652,7 +949,7 @@ def rolling_temporal_association(
     ), on_progress, 'rolling_windows', total=len(window_end_positions)):
         start_position = end_position - window_size + 1
         window = _slice_rows(df, start_position, end_position + 1)
-        valid_pairs = _select_valid_temporal_pairs(window, feature, target)
+        valid_pairs = _select_valid_temporal_pairs(window, feature, target, check_all_missing=False)
         row = {
             'symbol': symbol,
             'feature': feature,
@@ -834,9 +1131,13 @@ def temporal_association_summary_table(
 
     Notes
     -----
-    Candidate blocks are generated separately per feature because missing
-    values can change the valid feature-target observations. Reusing blocks
-    across features in that case would alter their estimands.
+    Candidate blocks are generated separately per feature because missing or
+    non-finite values can change the valid feature-target observations.
+    Reusing blocks across features in that case would alter their estimands.
+
+    Without continuity_col, removing invalid pairs compresses their positions
+    before candidate blocks are generated. Supply original integer positions
+    when blocks must not cross gaps in a previously filtered time axis.
 
     MBB samples can repeat timestamps, so their estimates call the underlying
     information_coefficient() directly after resampling. The observed estimate
@@ -848,11 +1149,18 @@ def temporal_association_summary_table(
     reject_h0 and p_value are determined only by the Wald test.
     """
     _validate_progress_callback(on_progress)
-    if not feature_list:
-        raise ValueError('feature_list must not be empty.')
-
-    if len(set(feature_list)) != len(feature_list):
-        raise ValueError('feature_list must not contain duplicates.')
+    _validate_feature_list(feature_list)
+    _validate_summary_bootstrap_configuration(
+        block_length=block_length,
+        n_bootstraps=n_bootstraps,
+        step=step,
+        confidence_level=confidence_level,
+        random_state=random_state,
+    )
+    _validate_continuity_column(
+        continuity_col,
+        [time_col, symbol_col, target, *feature_list],
+    )
 
     rows = []
 
@@ -865,6 +1173,11 @@ def temporal_association_summary_table(
             time_col=time_col,
             symbol_col=symbol_col,
         )
+        if not np.isfinite(observed_association):
+            raise ValueError(
+                f'temporal association is undefined for feature {feature!r}.',
+            )
+
         valid_pairs = _select_valid_temporal_pairs(
             df, feature, target,
             [continuity_col] if continuity_col is not None else None,
@@ -893,6 +1206,11 @@ def temporal_association_summary_table(
             for sample in _progress_iter(bootstrap_samples, on_progress, f'feature/{feature}/bootstrap_estimates')
         ]
         metrics = bootstrap_metrics(bootstrap_estimates, confidence_level)
+        if not np.isfinite(metrics.std) or metrics.std <= 0:
+            raise ValueError(
+                f'bootstrap standard error is undefined for feature {feature!r}.',
+            )
+
         test_result = wald_temporal_association_test(
             observed_association=observed_association,
             bootstrap_standard_error=metrics.std,
@@ -1017,14 +1335,25 @@ def partial_temporal_association_summary_table(
         specification, or a resampling/test input is invalid.
     """
     _validate_progress_callback(on_progress)
-    if not feature_list:
-        raise ValueError('feature_list must not be empty.')
-    if len(set(feature_list)) != len(feature_list):
-        raise ValueError('feature_list must not contain duplicates.')
+    _validate_feature_list(feature_list)
+    _validate_summary_bootstrap_configuration(
+        block_length=block_length,
+        n_bootstraps=n_bootstraps,
+        step=step,
+        confidence_level=confidence_level,
+        random_state=random_state,
+    )
 
     normalized_covariates = _normalize_covariates(covariates)
     if any(feature in normalized_covariates for feature in feature_list):
         raise ValueError('feature_list must not contain covariate columns.')
+    _validate_continuity_column(
+        continuity_col,
+        [
+            time_col, symbol_col, target, *feature_list,
+            *normalized_covariates,
+        ],
+    )
 
     rows = []
     for feature in _progress_iter(feature_list, on_progress, 'features'):
@@ -1038,6 +1367,11 @@ def partial_temporal_association_summary_table(
             symbol_col=symbol_col,
             min_n=min_n,
         )
+        if not np.isfinite(observed_association):
+            raise ValueError(
+                f'partial temporal association is undefined for feature {feature!r}.',
+            )
+
         valid_observations = _select_valid_temporal_pairs(
             df,
             feature,
@@ -1071,6 +1405,11 @@ def partial_temporal_association_summary_table(
             for sample in _progress_iter(bootstrap_samples, on_progress, f'feature/{feature}/bootstrap_estimates')
         ]
         metrics = bootstrap_metrics(bootstrap_estimates, confidence_level)
+        if not np.isfinite(metrics.std) or metrics.std <= 0:
+            raise ValueError(
+                f'bootstrap standard error is undefined for feature {feature!r}.',
+            )
+
         test_result = wald_temporal_association_test(
             observed_association=observed_association,
             bootstrap_standard_error=metrics.std,
@@ -1140,6 +1479,7 @@ def temporal_association_decay(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        continuity_col: str | None = None,
         *,
         on_progress: ProgressCallback | None = None,
 ) -> TemporalAssociationDecayResult:
@@ -1194,6 +1534,9 @@ def temporal_association_decay(
         False discovery rate for the horizon family.
     fdr_method : {'bh', 'by'}, default 'bh'
         Multiple-testing correction method.
+    continuity_col : str | None, default None
+        Original integer observation positions from df_feature. When supplied,
+        MBB candidate blocks cannot cross feature-target join gaps.
     on_progress : callable | None, default None
         Optional synchronous observer called with (phase, completed, total).
         Counts describe processed local units, including skipped units;
@@ -1227,7 +1570,21 @@ def temporal_association_decay(
     rolling temporal-association diagnostic and does not construct windows.
     """
     _validate_progress_callback(on_progress)
-    _validate_df(df_feature, [time_col, symbol_col, feature])
+    _validate_summary_bootstrap_configuration(
+        block_length=block_length,
+        n_bootstraps=n_bootstraps,
+        step=step,
+        confidence_level=confidence_level,
+        random_state=random_state,
+    )
+    _validate_continuity_column(
+        continuity_col,
+        [time_col, symbol_col, feature],
+    )
+    required_columns = [time_col, symbol_col, feature]
+    if continuity_col is not None:
+        required_columns.append(continuity_col)
+    _validate_df(df_feature, required_columns)
     _validate_single_symbol(df_feature, symbol_col)
     _validate_time_order(df_feature, time_col)
 
@@ -1253,6 +1610,7 @@ def temporal_association_decay(
         feature_groups=feature_groups,
         fdr=fdr,
         fdr_method=fdr_method,
+        continuity_col=continuity_col,
         **_progress_kwargs(on_progress),
     )
 
@@ -1272,6 +1630,7 @@ def _temporal_association_decay_from_target_frames(
         feature_groups: dict[str, str] | None,
         fdr: float,
         fdr_method: Literal['bh', 'by'],
+        continuity_col: str | None = None,
         *,
         on_progress: ProgressCallback | None = None,
 ) -> TemporalAssociationDecayResult:
@@ -1309,6 +1668,9 @@ def _temporal_association_decay_from_target_frames(
         False discovery rate across horizons.
     fdr_method : {'bh', 'by'}
         FDR correction method.
+    continuity_col : str | None, default None
+        Original integer positions stored in df_feature. When supplied, the
+        column is retained across target joins and passed to MBB.
     on_progress : callable | None, default None
         Optional synchronous observer called with (phase, completed, total).
         Counts describe processed local units, including skipped units;
@@ -1339,6 +1701,10 @@ def _temporal_association_decay_from_target_frames(
     reused for every feature.
     """
     _validate_progress_callback(on_progress)
+    _validate_continuity_column(
+        continuity_col,
+        [time_col, symbol_col, feature],
+    )
     feature_group = (
         feature_groups.get(feature, 'ungrouped')
         if feature_groups is not None
@@ -1363,6 +1729,22 @@ def _temporal_association_decay_from_target_frames(
             time_col=time_col,
             symbol_col=symbol_col,
         )
+        if continuity_col is not None:
+            keys = [time_col, symbol_col]
+            if isinstance(joined_df, pd.DataFrame):
+                joined_df = joined_df.merge(
+                    df_feature[keys + [continuity_col]],
+                    on=keys,
+                    how='left',
+                    validate='one_to_one',
+                )
+            else:
+                joined_df = joined_df.join(
+                    df_feature.select(keys + [continuity_col]),
+                    on=keys,
+                    how='left',
+                    validate='1:1',
+                )
         if isinstance(joined_df, pd.DataFrame):
             joined_df = joined_df.sort_values(time_col).reset_index(drop=True)
         else:
@@ -1381,6 +1763,7 @@ def _temporal_association_decay_from_target_frames(
             time_col=time_col,
             symbol_col=symbol_col,
             feature_groups={feature: feature_group},
+            continuity_col=continuity_col,
             **_progress_kwargs(on_progress, f'horizon/{horizon}'),
         )
         if isinstance(horizon_table, pd.DataFrame):
@@ -1459,8 +1842,9 @@ def temporal_association_decay_summary(
     Raises
     ------
     ValueError
-        If decay_curve is empty, has duplicate horizons, or has no finite
-        association values.
+        If decay_curve is empty, horizons are not unique positive integers,
+        associations are not numeric or contain no finite value, FDR flags are
+        not boolean, or a non-finite association is marked significant.
     KeyError
         If a required decay-curve column is absent.
     TypeError
@@ -1474,16 +1858,38 @@ def temporal_association_decay_summary(
     """
     _validate_df(decay_curve, ['horizon', 'association', 'fdr_rejected'])
 
-    if isinstance(decay_curve, pd.DataFrame):
-        curve = decay_curve.sort_values('horizon')
-        horizons = curve['horizon'].to_numpy(dtype=int)
-        association = curve['association'].to_numpy(dtype=float)
-        rejected = curve['fdr_rejected'].to_numpy(dtype=bool)
-    else:
-        curve = decay_curve.sort('horizon')
-        horizons = curve['horizon'].to_numpy()
-        association = curve['association'].to_numpy()
-        rejected = curve['fdr_rejected'].to_numpy()
+    raw_horizon_values = decay_curve['horizon'].to_numpy()
+    raw_association_values = decay_curve['association'].to_numpy()
+    numeric_types = (int, float, np.integer, np.floating)
+    if (
+            any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, numeric_types)
+                for value in raw_horizon_values
+            )
+            or any(
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, numeric_types)
+                for value in raw_association_values
+            )
+    ):
+        raise ValueError('horizon and association must contain numeric values.')
+
+    raw_horizons = raw_horizon_values.astype(float, copy=False)
+    association = raw_association_values.astype(float, copy=False)
+
+    if (
+            not np.isfinite(raw_horizons).all()
+            or (raw_horizons <= 0).any()
+            or not np.equal(raw_horizons, np.floor(raw_horizons)).all()
+    ):
+        raise ValueError('horizon must contain positive integers.')
+
+    horizons = raw_horizons.astype(int)
+    rejected_values = decay_curve['fdr_rejected'].to_numpy()
+    if not all(isinstance(value, (bool, np.bool_)) for value in rejected_values):
+        raise ValueError('fdr_rejected must contain boolean values.')
+    rejected = rejected_values.astype(bool)
 
     if len(horizons) == 0:
         raise ValueError('decay_curve must not be empty.')
@@ -1491,9 +1897,19 @@ def temporal_association_decay_summary(
     if len(np.unique(horizons)) != len(horizons):
         raise ValueError('decay_curve must contain exactly one row per horizon.')
 
+    order = np.argsort(horizons)
+    horizons = horizons[order]
+    association = association[order]
+    rejected = rejected[order]
+
     finite_mask = np.isfinite(association)
     if not finite_mask.any():
         raise ValueError('decay_curve contains no finite association values.')
+
+    if (rejected & ~finite_mask).any():
+        raise ValueError(
+            'a non-finite association cannot be marked as FDR-rejected.',
+        )
 
     valid_horizons = horizons[finite_mask]
     valid_abs_association = np.abs(association[finite_mask])
@@ -1567,6 +1983,7 @@ def temporal_association_decay_summary_table(
         feature_groups: dict[str, str] | None = None,
         fdr: float = 0.05,
         fdr_method: Literal['bh', 'by'] = 'bh',
+        continuity_col: str | None = None,
         *,
         on_progress: ProgressCallback | None = None,
 ) -> TemporalAssociationDecaySummaryTableResult:
@@ -1612,6 +2029,9 @@ def temporal_association_decay_summary_table(
         False discovery rate per feature across its horizons.
     fdr_method : {'bh', 'by'}, default 'bh'
         Multiple-testing correction method.
+    continuity_col : str | None, default None
+        Original integer observation positions shared by all features. When
+        supplied, MBB candidate blocks cannot cross target-join gaps.
     on_progress : callable | None, default None
         Optional synchronous observer called with (phase, completed, total).
         Counts describe processed local units, including skipped units;
@@ -1640,16 +2060,28 @@ def temporal_association_decay_summary_table(
     Notes
     -----
     This function does not perform rolling analysis. It evaluates one
-    full-sample association per feature-horizon pair.
+    full-sample association per feature-horizon pair. FDR correction is
+    applied separately to each feature's horizon family. A fixed root seed is
+    deliberately reused across features so their horizon resamples are
+    aligned rather than independently redrawn.
     """
     _validate_progress_callback(on_progress)
-    if not feature_list:
-        raise ValueError('feature_list must not be empty.')
-
-    if len(set(feature_list)) != len(feature_list):
-        raise ValueError('feature_list must not contain duplicates.')
-
-    _validate_df(df_features, [time_col, symbol_col] + feature_list)
+    _validate_feature_list(feature_list)
+    _validate_summary_bootstrap_configuration(
+        block_length=block_length,
+        n_bootstraps=n_bootstraps,
+        step=step,
+        confidence_level=confidence_level,
+        random_state=random_state,
+    )
+    _validate_continuity_column(
+        continuity_col,
+        [time_col, symbol_col, *feature_list],
+    )
+    required_columns = [time_col, symbol_col, *feature_list]
+    if continuity_col is not None:
+        required_columns.append(continuity_col)
+    _validate_df(df_features, required_columns)
     _validate_single_symbol(df_features, symbol_col)
     _validate_time_order(df_features, time_col)
 
@@ -1679,6 +2111,7 @@ def temporal_association_decay_summary_table(
             feature_groups=feature_groups,
             fdr=fdr,
             fdr_method=fdr_method,
+            continuity_col=continuity_col,
             **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         decay_table = decay_result.table

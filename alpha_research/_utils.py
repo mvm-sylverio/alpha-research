@@ -49,13 +49,17 @@ def _validate_df(
     Raises
     ------
     TypeError
-        If df is not pandas or polars type.
+        If df is not pandas or polars type, or check_all_missing is not
+        boolean.
     KeyError
         If columns in required_cols are not columns of the df.
     ValueError
         If DataFrame is empty or, when check_all_missing is True, required
         columns are missing all values.
     """
+    if type(check_all_missing) is not bool:
+        raise TypeError('check_all_missing must be boolean.')
+
     # Check DataFrame type
     _validate_df_type(df)
 

@@ -118,6 +118,19 @@ def test_validate_df_can_allow_all_missing_required_columns(df):
     _validate_df(df, required_cols=['a'], check_all_missing=False)
 
 
+@pytest.mark.parametrize('check_all_missing', [None, 0, 1, 'false'])
+def test_validate_df_rejects_non_boolean_missing_flag(check_all_missing):
+    """Should reject ambiguous values for the all-missing validation flag."""
+    df = pd.DataFrame({'a': [1.0]})
+
+    with pytest.raises(TypeError, match='check_all_missing must be boolean'):
+        _validate_df(
+            df,
+            required_cols=['a'],
+            check_all_missing=check_all_missing,
+        )
+
+
 # ------------------------------------------------------
 # _is_all_missing
 # ------------------------------------------------------
