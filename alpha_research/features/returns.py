@@ -2,7 +2,7 @@ import pandas as pd
 import polars as pl
 import numpy as np
 
-from alpha_research._utils import _validate_df
+from alpha_research.features.targets import _valid_price_expression, _validate_return_input
 
 __all__ = ['simple_returns', 'log_returns']
 
@@ -23,7 +23,7 @@ def simple_returns(
         Wide DataFrame (usually a full OHLCV) with at least the columns price_col,
         symbol_col and time_col.
     horizon : int
-        Backwards horizon in which the simple return will be computed.
+        Positive number of previous observations per symbol.
     price_col : str
         Price column in which the simple return will be computed. Usually the close
         price column.
@@ -44,20 +44,33 @@ def simple_returns(
         If time_col, symbol_col, price_col are not columns of the df.
     TypeError
         If df is not pandas or polars type.
+    ValueError
+        If horizon is not a positive integer or keys are missing, duplicated,
+        or out of chronological order within a symbol.
+
+    Notes
+    -----
+    Non-positive or non-finite prices yield missing returns for affected pairs.
+    A horizon at least as long as a symbol's history yields missing values.
     """
-    _validate_df(df, [time_col, symbol_col, price_col])
+    _validate_return_input(df, horizon, price_col, symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
         result = df[[time_col, symbol_col]].copy()
-        previous_price = df.groupby(symbol_col)[price_col].shift(horizon)
-        result[f'simple_ret_{horizon}'] = df[price_col] / previous_price - 1
+        price = pd.to_numeric(df[price_col], errors='raise').astype(float)
+        price = price.where(np.isfinite(price) & (price > 0))
+        previous_price = price.groupby(df[symbol_col]).shift(horizon)
+        result[f'simple_ret_{horizon}'] = (price / previous_price - 1).replace([np.inf, -np.inf], np.nan)
         return result
 
     else:  # pl.Dataframe type
+        price = _valid_price_expression(price_col)
+        previous_price = price.shift(horizon).over(symbol_col)
         return df.select([
             time_col,
             symbol_col,
-            (pl.col(price_col) / pl.col(price_col).shift(horizon) - 1).over(symbol_col)
+            (price / previous_price - 1)
+            .replace([float('inf'), float('-inf')], None)
             .alias(f'simple_ret_{horizon}')])
 
 
@@ -77,7 +90,7 @@ def log_returns(
         Wide DataFrame (usually a full OHLCV) with at least the columns price_col,
         symbol_col and time_col.
     horizon : int
-        Backwards horizon in which the logarithm return will be computed.
+        Positive number of previous observations per symbol.
     price_col : str
         Price column in which the logarithm return will be computed. Usually the close
         price column.
@@ -98,19 +111,30 @@ def log_returns(
         If time_col, symbol_col, price_col are not columns of the df.
     TypeError
         If df is not pandas or polars type.
+    ValueError
+        If horizon is not a positive integer or keys are missing, duplicated,
+        or out of chronological order within a symbol.
+
+    Notes
+    -----
+    Non-positive or non-finite prices yield missing returns for affected pairs.
+    A horizon at least as long as a symbol's history yields missing values.
     """
-    _validate_df(df, [time_col, symbol_col, price_col])
+    _validate_return_input(df, horizon, price_col, symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
         result = df[[time_col, symbol_col]].copy()
-        previous_price = df.groupby(symbol_col)[price_col].shift(horizon)
-        result[f'log_ret_{horizon}'] = np.log(df[price_col] / previous_price)
+        price = pd.to_numeric(df[price_col], errors='raise').astype(float)
+        price = price.where(np.isfinite(price) & (price > 0))
+        previous_price = price.groupby(df[symbol_col]).shift(horizon)
+        result[f'log_ret_{horizon}'] = np.log(price) - np.log(previous_price)
         return result
 
     else:  # pl.Dataframe type
+        log_price = _valid_price_expression(price_col).log()
+        previous_log_price = log_price.shift(horizon).over(symbol_col)
         return df.select([
             time_col,
             symbol_col,
-            (pl.col(price_col) / pl.col(price_col).shift(horizon)).over(symbol_col)
-            .log()
+            (log_price - previous_log_price)
             .alias(f'log_ret_{horizon}')])

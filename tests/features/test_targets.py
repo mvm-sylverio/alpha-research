@@ -470,3 +470,105 @@ def test_triple_barrier_batch_labels_handles_missing_paths_and_vertical_labels()
 
     np.testing.assert_allclose(labels[[0, 2]], [1.0, 1.0])
     assert np.isnan(labels[1])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('bad_high,bad_low', [(98., 99.), (np.inf, 99.), (100., 0.)])
+def test_triple_barrier_invalid_bar_only_invalidates_dependent_events(backend, bad_high, bad_low):
+    """Should mark paths requiring an invalid OHLC bar as indeterminate."""
+    frame = _ohlc_frame([100.] * 4, [100., bad_high, 103., 100.], [100., bad_low, 99., 99.])
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    values = ohlc_triple_barrier_labels(frame, 1, 0.02, 0.02)['triple_barrier_1'].to_numpy().astype(float)
+    np.testing.assert_allclose(values, [np.nan, 1., 0., np.nan], equal_nan=True)
+
+
+@pytest.mark.parametrize('horizon', [0, -1, True, 1.5])
+def test_triple_barrier_rejects_invalid_horizon(horizon):
+    """Should reject nonpositive, boolean and noninteger horizons."""
+    frame = _ohlc_frame([100., 100.], [100., 100.], [100., 100.])
+    with pytest.raises(ValueError, match='horizon'):
+        ohlc_triple_barrier_labels(frame, horizon, 0.02, 0.02)
+
+
+def test_triple_barrier_group_rejects_mismatched_shapes():
+    """Should reject mismatched group vectors even for an incomplete horizon."""
+    with pytest.raises(ValueError, match='shapes'):
+        _triple_barrier_group_labels(np.ones(2), np.ones(1), np.ones(2), np.ones(2),
+                                     np.ones(2), np.ones(2), 3, 'neutral', 'neutral')
+
+
+def test_triple_barrier_batch_rejects_mismatched_shapes():
+    """Should reject incompatible path and event dimensions explicitly."""
+    with pytest.raises(ValueError, match='shapes'):
+        _triple_barrier_batch_labels(np.ones((2, 1)), np.ones((1, 1)), np.ones(2),
+                                     np.ones(2), np.ones(2), np.ones(2),
+                                     np.ones(2, dtype=bool), 'neutral', 'neutral')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('tie_break', ['neutral', 'take_profit', 'stop_loss'])
+def test_triple_barrier_matches_event_by_event_reference(backend, tie_break):
+    """Should match a sequential first-touch oracle on seeded small paths."""
+    rng = np.random.default_rng(823)
+    close = rng.uniform(90, 110, 25)
+    high = close + rng.uniform(0, 5, 25)
+    low = close - rng.uniform(0, 5, 25)
+    frame = _ohlc_frame(close, high, low)
+    horizon = 3
+    expected = []
+    for index in range(len(close)):
+        label = np.nan
+        if index + horizon < len(close):
+            label = 0.0
+            for future in range(index + 1, index + horizon + 1):
+                upper = high[future] >= close[index] * 1.02
+                lower = low[future] <= close[index] * 0.98
+                if upper and lower:
+                    label = {'neutral': 0., 'take_profit': 1., 'stop_loss': -1.}[tie_break]
+                    break
+                if upper or lower:
+                    label = 1. if upper else -1.
+                    break
+        expected.append(label)
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    actual = ohlc_triple_barrier_labels(
+        frame, horizon, 0.02, 0.02, vertical_label='neutral', tie_break=tie_break,
+    )['triple_barrier_3'].to_numpy().astype(float)
+    np.testing.assert_allclose(actual, expected, equal_nan=True)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('tie_break', ['neutral', 'take_profit', 'stop_loss'])
+def test_triple_barrier_matches_reference_with_invalid_paths(backend, tie_break):
+    """Should resolve valid first touches and stop at invalid path bars."""
+    rng = np.random.default_rng(427)
+    close = rng.uniform(95, 105, 35)
+    high = close + rng.uniform(0, 4, 35)
+    low = close - rng.uniform(0, 4, 35)
+    high[[3, 13]] = [np.nan, np.inf]
+    low[[7, 19]] = [-np.inf, 0.]
+    close[[9, 22]] = [np.nan, -1.]
+    horizon = 4
+    expected = []
+    for i in range(len(close)):
+        label = np.nan
+        if i + horizon < len(close) and np.isfinite(close[i]) and close[i] > 0:
+            for j in range(i + 1, i + horizon + 1):
+                if not (np.isfinite(high[j]) and np.isfinite(low[j]) and 0 < low[j] <= high[j]):
+                    break
+                upper = high[j] >= close[i] * 1.02
+                lower = low[j] <= close[i] * 0.98
+                if upper or lower:
+                    label = ({'neutral': 0., 'take_profit': 1., 'stop_loss': -1.}[tie_break]
+                             if upper and lower else 1. if upper else -1.)
+                    break
+            else:
+                if np.isfinite(close[i + horizon]) and close[i + horizon] > 0:
+                    label = float(np.sign(close[i + horizon] - close[i]))
+        expected.append(label)
+    frame = _ohlc_frame(close, high, low)
+    data = frame if backend == 'pandas' else pl.from_pandas(frame)
+    actual = ohlc_triple_barrier_labels(data, horizon, 0.02, 0.02, tie_break=tie_break)
+    np.testing.assert_allclose(actual['triple_barrier_4'].to_numpy().astype(float), expected, equal_nan=True)
