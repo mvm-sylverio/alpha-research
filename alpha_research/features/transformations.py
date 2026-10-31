@@ -1,3 +1,9 @@
+"""Transform numeric features without overwriting existing output columns.
+
+All public transformations raise ValueError when a generated column name is
+already present, including when it is another requested input feature.
+"""
+
 from numbers import Real
 
 import numpy as np
@@ -8,6 +14,7 @@ from alpha_research._utils import (
     _validate_df,
     _validate_finite_number,
     _validate_positive_integer,
+    _validate_unique_keys,
 )
 
 __all__ = [
@@ -146,7 +153,7 @@ def _validate_elementwise_features(
     TypeError
         If df or feature_cols has an unsupported type.
     ValueError
-        If a feature is non-numeric, entirely missing, or contains infinity.
+        If a non-missing feature is non-numeric or contains infinity.
     """
     normalized = _normalize_feature_cols(feature_cols)
     if any(not isinstance(feature, str) or not feature for feature in normalized):
@@ -155,11 +162,11 @@ def _validate_elementwise_features(
         raise ValueError('feature_cols must not contain duplicate names.')
     if isinstance(df, pd.DataFrame) and not df.columns.is_unique:
         raise ValueError('DataFrame must not contain duplicate column names.')
-    _validate_df(df, normalized)
+    _validate_df(df, normalized, check_all_missing=False)
     for feature in normalized:
         series = df[feature]
         if isinstance(df, pd.DataFrame):
-            if (
+            if not series.isna().all() and (
                     not pd.api.types.is_numeric_dtype(series)
                     or pd.api.types.is_bool_dtype(series)
                     or pd.api.types.is_complex_dtype(series)
@@ -168,12 +175,101 @@ def _validate_elementwise_features(
             if np.isinf(series.dropna().to_numpy(dtype=float)).any():
                 raise ValueError(f'{feature} must contain only finite or missing values.')
         else:
-            if not series.dtype.is_numeric():
+            if not series.dtype.is_numeric() and series.dtype != pl.Null:
                 raise ValueError(f'{feature} must be numeric.')
             non_missing = series.drop_nulls()
             if non_missing.dtype.is_float() and non_missing.is_infinite().any():
                 raise ValueError(f'{feature} must contain only finite or missing values.')
     return normalized
+
+
+def _polars_feature_values(df: pl.DataFrame, feature: str) -> pl.Expr:
+    """Normalize missing Polars feature values for calculation.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Source frame.
+    feature : str
+        Selected numeric feature.
+
+    Returns
+    -------
+    pl.Expr
+        Expression converting NaN to null and Null dtype to Float64.
+
+    Raises
+    ------
+    KeyError
+        If the feature is missing.
+    """
+    if feature not in df.columns:
+        raise KeyError(feature)
+    value = pl.col(feature)
+    if df.schema[feature] == pl.Null:
+        value = value.cast(pl.Float64)
+    return value.fill_nan(None)
+
+
+def _validate_grouped_features(df, feature_cols, symbol_col, time_col):
+    """Validate feature values and observation keys for grouped transforms.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Input observations.
+    feature_cols : str | list[str]
+        Feature names to transform.
+    symbol_col, time_col : str
+        Observation key columns.
+
+    Returns
+    -------
+    list[str]
+        Validated feature names in input order.
+
+    Raises
+    ------
+    TypeError, KeyError, ValueError
+        If the input, feature values, or observation keys are invalid.
+    """
+    features = _validate_elementwise_features(df, feature_cols)
+    _validate_df(df, [symbol_col, time_col], check_all_missing=False)
+    for column in (symbol_col, time_col):
+        series = df[column]
+        missing = series.isna().any() if isinstance(df, pd.DataFrame) else series.is_null().any() or (series.dtype.is_float() and series.is_nan().any())
+        if missing:
+            raise ValueError(f'{column} must not contain missing values.')
+    _validate_unique_keys(df, [time_col, symbol_col], 'df')
+    return features
+
+
+def _validate_output_columns(df, features: list[str], suffix: str) -> None:
+    """Reject generated column names that already exist in the input.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Validated input frame.
+    features : list[str]
+        Selected feature names.
+    suffix : str
+        Suffix appended to each feature name.
+
+    Returns
+    -------
+    None
+        Returns None when output names are available.
+
+    Raises
+    ------
+    ValueError
+        If a generated output column is already present or repeated.
+    """
+    outputs = [f'{feature}_{suffix}' for feature in features]
+    collisions = [name for name in outputs if name in df.columns]
+    if collisions or len(outputs) != len(set(outputs)):
+        raise ValueError(f'transformation output columns already exist or repeat: {collisions}.')
 
 
 def cross_sectional_rank(
@@ -228,9 +324,8 @@ def cross_sectional_rank(
     Cross-sectional operation: rank is computed per date across assets,
     not along the time axis. Not meaningful for single-asset datasets.
     """
-    feature_cols = _normalize_feature_cols(feature_cols)
-
-    _validate_df(df, [symbol_col, time_col] + feature_cols)
+    feature_cols = _validate_grouped_features(df, feature_cols, symbol_col, time_col)
+    _validate_output_columns(df, feature_cols, 'cs_rank')
 
     if isinstance(df, pd.DataFrame):
         result = df.copy()
@@ -240,7 +335,7 @@ def cross_sectional_rank(
 
     else:  # polars DataFrame
         return df.with_columns([
-            pl.col(feature)
+            _polars_feature_values(df, feature)
             .rank(method='average')
             .over(time_col)
             .alias(f'{feature}_cs_rank')
@@ -281,16 +376,15 @@ def cross_sectional_zscore(
     TypeError
         If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
     ValueError
-        If df is empty, a required column is entirely missing, or feature_cols
-        is an empty list.
+        If df is empty, keys are invalid, features are invalid, or contain infinity.
 
     Notes
     -----
     Cross-sections with fewer than two valid values or zero dispersion produce
     missing transformed values because their z-score is undefined.
     """
-    feature_cols = _normalize_feature_cols(feature_cols)
-    _validate_df(df, [symbol_col, time_col] + feature_cols)
+    feature_cols = _validate_grouped_features(df, feature_cols, symbol_col, time_col)
+    _validate_output_columns(df, feature_cols, 'cs_zscore')
 
     if isinstance(df, pd.DataFrame):
         result = df.copy()
@@ -303,7 +397,7 @@ def cross_sectional_zscore(
 
     expressions = []
     for feature in feature_cols:
-        values = pl.col(feature).fill_nan(None)
+        values = _polars_feature_values(df, feature)
         mean = values.mean().over(time_col)
         std = values.std(ddof=0).over(time_col)
         expressions.append(
@@ -354,7 +448,7 @@ def cross_sectional_quantile_rank(
     TypeError
         If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
     ValueError
-        If df is empty, a required column is entirely missing, feature_cols is
+        If df is empty, keys or feature values are invalid, feature_cols is
         empty, or n_quantiles is not a positive integer.
 
     Notes
@@ -363,9 +457,9 @@ def cross_sectional_quantile_rank(
     groups. This can leave some quantile labels unused. Cross-sections with
     fewer than n_quantiles valid observations return missing labels.
     """
-    feature_cols = _normalize_feature_cols(feature_cols)
+    feature_cols = _validate_grouped_features(df, feature_cols, symbol_col, time_col)
     _validate_positive_integer(n_quantiles, 'n_quantiles')
-    _validate_df(df, [symbol_col, time_col] + feature_cols)
+    _validate_output_columns(df, feature_cols, f'cs_quantile_rank_{n_quantiles}')
 
     if isinstance(df, pd.DataFrame):
         result = df.copy()
@@ -381,7 +475,7 @@ def cross_sectional_quantile_rank(
 
     expressions = []
     for feature in feature_cols:
-        values = pl.col(feature).fill_nan(None)
+        values = _polars_feature_values(df, feature)
         ranks = values.rank(method='average').over(time_col)
         counts = values.count().over(time_col)
         expressions.append(
@@ -430,7 +524,7 @@ def rolling_rank(
     TypeError
         If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
     ValueError
-        If df is empty, a required column is entirely missing, feature_cols is
+        If df is empty, keys or feature values are invalid, feature_cols is
         empty, window is invalid, or times are invalid within an asset.
 
     Notes
@@ -438,9 +532,9 @@ def rolling_rank(
     The current value is included in its trailing window. A full window of
     non-missing values is required, and ties use the average-rank method.
     """
-    feature_cols = _normalize_feature_cols(feature_cols)
+    feature_cols = _validate_grouped_features(df, feature_cols, symbol_col, time_col)
     _validate_positive_integer(window, 'window')
-    _validate_df(df, [symbol_col, time_col] + feature_cols)
+    _validate_output_columns(df, feature_cols, f'rolling_rank_{window}')
     _validate_temporal_order_by_symbol(df, symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
@@ -458,8 +552,7 @@ def rolling_rank(
         return result
 
     return df.with_columns([
-        pl.col(feature)
-        .fill_nan(None)
+        _polars_feature_values(df, feature)
         .rolling_map(
             lambda values: values.rank(method='average')[-1],
             window_size=window,
@@ -508,7 +601,7 @@ def rolling_zscore(
     TypeError
         If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
     ValueError
-        If df is empty, a required column is entirely missing, feature_cols is
+        If df is empty, keys or feature values are invalid, feature_cols is
         empty, window is invalid, or times are invalid within an asset.
 
     Notes
@@ -516,9 +609,9 @@ def rolling_zscore(
     The current value is included in its trailing window. A full window of
     non-missing values is required. Constant windows return missing values.
     """
-    feature_cols = _normalize_feature_cols(feature_cols)
+    feature_cols = _validate_grouped_features(df, feature_cols, symbol_col, time_col)
     _validate_positive_integer(window, 'window')
-    _validate_df(df, [symbol_col, time_col] + feature_cols)
+    _validate_output_columns(df, feature_cols, f'rolling_zscore_{window}')
     _validate_temporal_order_by_symbol(df, symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
@@ -538,7 +631,7 @@ def rolling_zscore(
 
     expressions = []
     for feature in feature_cols:
-        values = pl.col(feature).fill_nan(None)
+        values = _polars_feature_values(df, feature)
         mean = values.rolling_mean(
             window_size=window,
             min_samples=window,
@@ -599,7 +692,7 @@ def rolling_quantile_rank(
     TypeError
         If df is not a Pandas or Polars DataFrame, or feature_cols is invalid.
     ValueError
-        If df is empty, a required column is entirely missing, feature_cols is
+        If df is empty, keys or feature values are invalid, feature_cols is
         empty, window or n_quantiles is invalid, n_quantiles exceeds window,
         or times are invalid within an asset.
 
@@ -609,13 +702,13 @@ def rolling_quantile_rank(
     non-missing values is required. Average ranks define ties, so ties are not
     split across groups and some group labels can be unused.
     """
-    feature_cols = _normalize_feature_cols(feature_cols)
+    feature_cols = _validate_grouped_features(df, feature_cols, symbol_col, time_col)
     _validate_positive_integer(window, 'window')
     _validate_positive_integer(n_quantiles, 'n_quantiles')
     if n_quantiles > window:
         raise ValueError('n_quantiles must not exceed window.')
+    _validate_output_columns(df, feature_cols, f'rolling_quantile_rank_{window}_{n_quantiles}')
 
-    _validate_df(df, [symbol_col, time_col] + feature_cols)
     _validate_temporal_order_by_symbol(df, symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
@@ -636,8 +729,7 @@ def rolling_quantile_rank(
         return result
 
     return df.with_columns([
-        pl.col(feature)
-        .fill_nan(None)
+        _polars_feature_values(df, feature)
         .rolling_map(
             lambda values: np.ceil(
                 values.rank(method='average')[-1] * n_quantiles / window,
@@ -676,16 +768,20 @@ def sign(
     TypeError
         If df or feature_cols has an unsupported type.
     ValueError
-        If a feature is non-numeric, entirely missing, or infinite.
+        If a non-missing feature is non-numeric or infinite.
     """
     features = _validate_elementwise_features(df, feature_cols)
+    _validate_output_columns(df, features, 'sign')
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
+            if result[feature].isna().all():
+                result[f'{feature}_sign'] = np.nan
+                continue
             result[f'{feature}_sign'] = np.sign(result[feature])
         return result
     return df.with_columns([
-        pl.col(feature).fill_nan(None).sign().alias(f'{feature}_sign')
+        _polars_feature_values(df, feature).sign().alias(f'{feature}_sign')
         for feature in features
     ])
 
@@ -715,16 +811,20 @@ def absolute(
     TypeError
         If df or feature_cols has an unsupported type.
     ValueError
-        If a feature is non-numeric, entirely missing, or infinite.
+        If a non-missing feature is non-numeric or infinite.
     """
     features = _validate_elementwise_features(df, feature_cols)
+    _validate_output_columns(df, features, 'abs')
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
+            if result[feature].isna().all():
+                result[f'{feature}_abs'] = np.nan
+                continue
             result[f'{feature}_abs'] = result[feature].abs()
         return result
     return df.with_columns([
-        pl.col(feature).fill_nan(None).abs().alias(f'{feature}_abs')
+        _polars_feature_values(df, feature).abs().alias(f'{feature}_abs')
         for feature in features
     ])
 
@@ -763,9 +863,12 @@ def power(
     features = _validate_elementwise_features(df, feature_cols)
     normalized_exponent = _validate_finite_number(exponent, 'exponent')
     exponent_label = str(exponent)
+    _validate_output_columns(df, features, f'power_{exponent_label}')
     is_integer = normalized_exponent.is_integer()
     for feature in features:
         series = df[feature]
+        if isinstance(df, pl.DataFrame) and series.dtype == pl.Null:
+            continue
         if isinstance(df, pd.DataFrame):
             valid = series.dropna()
             has_negative = (valid < 0).any()
@@ -793,8 +896,7 @@ def power(
             )
         return result
     return df.with_columns([
-        pl.col(feature)
-        .fill_nan(None)
+        _polars_feature_values(df, feature)
         .pow(normalized_exponent)
         .alias(f'{feature}_power_{exponent_label}')
         for feature in features
@@ -834,9 +936,12 @@ def signed_power(
     features = _validate_elementwise_features(df, feature_cols)
     normalized_exponent = _validate_finite_number(exponent, 'exponent')
     exponent_label = str(exponent)
+    _validate_output_columns(df, features, f'signed_power_{exponent_label}')
     if normalized_exponent < 0:
         for feature in features:
             series = df[feature]
+            if isinstance(df, pl.DataFrame) and series.dtype == pl.Null:
+                continue
             valid = series.dropna() if isinstance(df, pd.DataFrame) else series.drop_nulls()
             if not isinstance(df, pd.DataFrame) and valid.dtype.is_float():
                 valid = valid.drop_nans()
@@ -848,6 +953,9 @@ def signed_power(
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
+            if result[feature].isna().all():
+                result[f'{feature}_signed_power_{exponent_label}'] = np.nan
+                continue
             result[f'{feature}_signed_power_{exponent_label}'] = (
                 np.sign(result[feature])
                 * result[feature].abs().pow(normalized_exponent)
@@ -855,8 +963,8 @@ def signed_power(
         return result
     return df.with_columns([
         (
-            pl.col(feature).fill_nan(None).sign()
-            * pl.col(feature).fill_nan(None).abs().pow(normalized_exponent)
+            _polars_feature_values(df, feature).sign()
+            * _polars_feature_values(df, feature).abs().pow(normalized_exponent)
         ).alias(f'{feature}_signed_power_{exponent_label}')
         for feature in features
     ])
@@ -890,8 +998,11 @@ def log1p(
         If inputs are invalid or contain a finite value at or below -1.
     """
     features = _validate_elementwise_features(df, feature_cols)
+    _validate_output_columns(df, features, 'log1p')
     for feature in features:
         series = df[feature]
+        if isinstance(df, pl.DataFrame) and series.dtype == pl.Null:
+            continue
         valid = series.dropna() if isinstance(df, pd.DataFrame) else series.drop_nulls()
         if not isinstance(df, pd.DataFrame) and valid.dtype.is_float():
             valid = valid.drop_nans()
@@ -900,10 +1011,13 @@ def log1p(
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
+            if result[feature].isna().all():
+                result[f'{feature}_log1p'] = np.nan
+                continue
             result[f'{feature}_log1p'] = np.log1p(result[feature])
         return result
     return df.with_columns([
-        pl.col(feature).fill_nan(None).log1p().alias(f'{feature}_log1p')
+        _polars_feature_values(df, feature).log1p().alias(f'{feature}_log1p')
         for feature in features
     ])
 
@@ -933,20 +1047,24 @@ def signed_log1p(
     TypeError
         If df or feature_cols has an unsupported type.
     ValueError
-        If a feature is non-numeric, entirely missing, or infinite.
+        If a non-missing feature is non-numeric or infinite.
     """
     features = _validate_elementwise_features(df, feature_cols)
+    _validate_output_columns(df, features, 'signed_log1p')
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
+            if result[feature].isna().all():
+                result[f'{feature}_signed_log1p'] = np.nan
+                continue
             result[f'{feature}_signed_log1p'] = (
                 np.sign(result[feature]) * np.log1p(result[feature].abs())
             )
         return result
     return df.with_columns([
         (
-            pl.col(feature).fill_nan(None).sign()
-            * pl.col(feature).fill_nan(None).abs().log1p()
+            _polars_feature_values(df, feature).sign()
+            * _polars_feature_values(df, feature).abs().log1p()
         ).alias(f'{feature}_signed_log1p')
         for feature in features
     ])
@@ -999,6 +1117,7 @@ def clip(
     ):
         raise ValueError('lower must not exceed upper.')
     label = f'{lower}_{upper}'
+    _validate_output_columns(df, features, f'clip_{label}')
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
@@ -1008,8 +1127,7 @@ def clip(
             )
         return result
     return df.with_columns([
-        pl.col(feature)
-        .fill_nan(None)
+        _polars_feature_values(df, feature)
         .clip(lower_bound=normalized_lower, upper_bound=normalized_upper)
         .alias(f'{feature}_clip_{label}')
         for feature in features

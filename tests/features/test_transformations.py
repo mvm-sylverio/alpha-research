@@ -5,7 +5,10 @@ import pytest
 
 from alpha_research.features.transformations import (
     _normalize_feature_cols,
+    _polars_feature_values,
     _validate_elementwise_features,
+    _validate_grouped_features,
+    _validate_output_columns,
     _validate_temporal_order_by_symbol,
     absolute,
     clip,
@@ -21,6 +24,226 @@ from alpha_research.features.transformations import (
     signed_log1p,
     signed_power,
 )
+
+
+def test_validate_output_columns_rejects_conflicts():
+    """Should accept unused names and reject existing or repeated outputs."""
+    frame = pd.DataFrame({'x': [1.], 'x_sign': [9.]})
+    assert _validate_output_columns(frame, ['x'], 'abs') is None
+    with pytest.raises(ValueError, match='x_sign'):
+        _validate_output_columns(frame, ['x'], 'sign')
+    with pytest.raises(ValueError, match='repeat'):
+        _validate_output_columns(frame, ['x', 'x'], 'abs')
+
+
+@pytest.mark.parametrize('function,kwargs,suffix', [
+    (cross_sectional_rank, {}, 'cs_rank'),
+    (cross_sectional_zscore, {}, 'cs_zscore'),
+    (cross_sectional_quantile_rank, {'n_quantiles': 2}, 'cs_quantile_rank_2'),
+    (rolling_rank, {'window': 2}, 'rolling_rank_2'),
+    (rolling_zscore, {'window': 2}, 'rolling_zscore_2'),
+    (rolling_quantile_rank, {'window': 2, 'n_quantiles': 2}, 'rolling_quantile_rank_2_2'),
+    (sign, {}, 'sign'), (absolute, {}, 'abs'), (power, {'exponent': 2}, 'power_2'),
+    (signed_power, {'exponent': 2}, 'signed_power_2'), (log1p, {}, 'log1p'),
+    (signed_log1p, {}, 'signed_log1p'), (clip, {'lower': 0}, 'clip_0_None'),
+])
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_transformations_reject_existing_outputs_before_modifying_input(function, kwargs, suffix, backend):
+    """Should reject output collisions consistently without changing input."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [1., 2.],
+                          f'x_{suffix}': [10., 20.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    original = frame.copy() if backend == 'pandas' else frame.clone()
+    with pytest.raises(ValueError, match=f'x_{suffix}'):
+        function(frame, 'x', **kwargs)
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(frame, original)
+    else:
+        assert frame.equals(original)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_transformation_rejects_output_that_is_another_selected_feature(backend):
+    """Should reject a batch whose first output is another requested input."""
+    frame = pd.DataFrame({'x': [1., 2.], 'x_sign': [3., 4.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with pytest.raises(ValueError, match='x_sign'):
+        sign(frame, ['x', 'x_sign'])
+
+
+def test_polars_feature_values_handles_null_dtype_and_missing_column():
+    """Should normalize Null dtype without modifying source or accepting absent columns."""
+    frame = pl.DataFrame({'x': [None, None]})
+    assert frame.select(_polars_feature_values(frame, 'x')).schema['x'] == pl.Float64
+    assert frame.schema['x'] == pl.Null
+    with pytest.raises(KeyError):
+        _polars_feature_values(frame, 'missing')
+
+
+@pytest.mark.parametrize('function,kwargs', [
+    (cross_sectional_rank, {}), (cross_sectional_zscore, {}),
+    (cross_sectional_quantile_rank, {'n_quantiles': 1}),
+    (rolling_rank, {'window': 1}), (rolling_zscore, {'window': 1}),
+    (rolling_quantile_rank, {'window': 1, 'n_quantiles': 1}),
+    (sign, {}), (absolute, {}), (power, {'exponent': 2}),
+    (signed_power, {'exponent': 2}), (log1p, {}),
+    (signed_log1p, {}), (clip, {'lower': 0}),
+])
+def test_transformations_preserve_untyped_null_feature(function, kwargs):
+    """Should produce missing output while preserving an untyped Null input."""
+    frame = pl.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [None, None]})
+    result = function(frame, 'x', **kwargs)
+    assert result.schema['x'] == pl.Null
+    assert result.select(pl.last()).to_series().null_count() == 2
+
+
+@pytest.mark.parametrize('function,kwargs', [
+    (cross_sectional_rank, {}), (cross_sectional_zscore, {}),
+    (cross_sectional_quantile_rank, {'n_quantiles': 1}),
+    (rolling_rank, {'window': 1}), (rolling_zscore, {'window': 1}),
+    (rolling_quantile_rank, {'window': 1, 'n_quantiles': 1}),
+    (sign, {}), (absolute, {}), (power, {'exponent': 2}),
+    (signed_power, {'exponent': 2}), (log1p, {}),
+    (signed_log1p, {}), (clip, {'lower': 0}),
+])
+def test_transformations_preserve_pandas_object_all_missing(function, kwargs):
+    """Should support an entirely missing object column without changing it."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [None, None]})
+    original = frame.copy()
+    result = function(frame, 'x', **kwargs)
+    assert result.iloc[:, -1].isna().all()
+    pd.testing.assert_frame_equal(frame, original)
+    assert result['x'].equals(original['x'])
+
+
+@pytest.mark.parametrize('function,kwargs,suffix,expected', [
+    (cross_sectional_rank, {}, 'cs_rank', [1., np.nan, 2., np.nan]),
+    (cross_sectional_zscore, {}, 'cs_zscore', [-1., np.nan, 1., np.nan]),
+    (cross_sectional_quantile_rank, {'n_quantiles': 2}, 'cs_quantile_rank_2', [1., np.nan, 2., np.nan]),
+    (rolling_rank, {'window': 1}, 'rolling_rank_1', [1., np.nan, 1., np.nan]),
+    (rolling_zscore, {'window': 1}, 'rolling_zscore_1', [np.nan] * 4),
+    (rolling_quantile_rank, {'window': 1, 'n_quantiles': 1}, 'rolling_quantile_rank_1_1', [1., np.nan, 1., np.nan]),
+])
+def test_grouped_transformations_native_missing_and_all_missing_feature(function, kwargs, suffix, expected):
+    """Should isolate missing features and match hand-calculated results across backends."""
+    data = {'time': [1, 1, 1, 1], 'symbol': ['A', 'B', 'C', 'D'],
+            'x': [1., np.nan, 3., None], 'empty': [None] * 4}
+    pandas_frame = pd.DataFrame(data, dtype=object).astype({'x': float, 'empty': float})
+    polars_frame = pl.DataFrame(data, schema_overrides={'x': pl.Float64, 'empty': pl.Float64})
+    for frame in (pandas_frame, polars_frame):
+        original = frame.copy() if isinstance(frame, pd.DataFrame) else frame.clone()
+        result = function(frame, ['x', 'empty'], **kwargs)
+        assert list(result.columns) == list(frame.columns) + [f'x_{suffix}', f'empty_{suffix}']
+        if isinstance(result, pd.DataFrame):
+            assert pd.api.types.is_numeric_dtype(result[f'x_{suffix}'])
+        else:
+            assert result.schema[f'x_{suffix}'].is_numeric()
+        np.testing.assert_allclose(result[f'x_{suffix}'].to_numpy().astype(float), expected, equal_nan=True)
+        assert np.isnan(result[f'empty_{suffix}'].to_numpy().astype(float)).all()
+        if isinstance(frame, pd.DataFrame):
+            pd.testing.assert_frame_equal(frame, original)
+        else:
+            assert frame.equals(original)
+
+
+@pytest.mark.parametrize('function,kwargs', [
+    (cross_sectional_rank, {}), (cross_sectional_zscore, {}),
+    (cross_sectional_quantile_rank, {'n_quantiles': 2}),
+    (rolling_rank, {'window': 2}), (rolling_zscore, {'window': 2}),
+    (rolling_quantile_rank, {'window': 2, 'n_quantiles': 2}),
+])
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('invalid', ['symbol', 'time', 'duplicate', 'infinity', 'negative_infinity', 'duplicate_feature'])
+def test_grouped_transformations_reject_invalid_keys_and_features(function, kwargs, backend, invalid):
+    """Should reject ambiguous keys, duplicate features, and infinite values."""
+    data = {'time': [1, 2, 3], 'symbol': ['A', 'A', 'A'], 'x': [1., 2., 3.]}
+    if invalid == 'duplicate':
+        data['time'][1] = 1
+    elif invalid in ('symbol', 'time'):
+        data[invalid][1] = None
+    elif invalid in ('infinity', 'negative_infinity'):
+        data['x'][1] = np.inf if invalid == 'infinity' else -np.inf
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    features = ['x', 'x'] if invalid == 'duplicate_feature' else ['x']
+    with pytest.raises(ValueError):
+        function(frame, features, **kwargs)
+
+
+def test_validate_grouped_features_contract():
+    """Should validate grouped feature names and keys without rejecting missing values."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [np.nan, np.nan]})
+    assert _validate_grouped_features(frame, 'x', 'symbol', 'time') == ['x']
+    with pytest.raises(KeyError):
+        _validate_grouped_features(frame, 'x', 'symbol', 'missing')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('function,kwargs,column', [
+    (cross_sectional_rank, {}, 'x_cs_rank'),
+    (cross_sectional_zscore, {}, 'x_cs_zscore'),
+    (rolling_rank, {'window': 3}, 'x_rolling_rank_3'),
+    (rolling_zscore, {'window': 3}, 'x_rolling_zscore_3'),
+    (cross_sectional_quantile_rank, {'n_quantiles': 2}, 'x_cs_quantile_rank_2'),
+    (rolling_quantile_rank, {'window': 3, 'n_quantiles': 2}, 'x_rolling_quantile_rank_3_2'),
+])
+def test_rank_and_zscore_are_positive_affine_invariant(backend, function, kwargs, column):
+    """Should preserve ranks and z-scores under positive scale and translation."""
+    frame = pd.DataFrame({'time': [1, 2, 3, 1, 2, 3],
+                          'symbol': ['A'] * 3 + ['B'] * 3,
+                          'x': [1., 4., 2., 7., 2., 5.]})
+    changed = frame.assign(x=frame['x'] * 3 + 7)
+    if backend == 'polars':
+        frame, changed = pl.from_pandas(frame), pl.from_pandas(changed)
+    np.testing.assert_allclose(function(frame, 'x', **kwargs)[column].to_numpy(),
+                               function(changed, 'x', **kwargs)[column].to_numpy(), equal_nan=True)
+
+
+@pytest.mark.parametrize('function,kwargs,column', [
+    (rolling_rank, {'window': 3}, 'x_rolling_rank_3'),
+    (rolling_zscore, {'window': 3}, 'x_rolling_zscore_3'),
+    (rolling_quantile_rank, {'window': 3, 'n_quantiles': 2}, 'x_rolling_quantile_rank_3_2'),
+])
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_rolling_windows_larger_than_each_asset_history(function, kwargs, column, backend):
+    """Should return missing values when no asset has a complete window."""
+    frame = pd.DataFrame({'time': [1, 2, 1], 'symbol': ['A', 'A', 'B'], 'x': [1., 2., 3.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    assert np.isnan(function(frame, 'x', **kwargs)[column].to_numpy().astype(float)).all()
+
+
+@pytest.mark.parametrize('function,kwargs,suffix', [
+    (sign, {}, 'sign'), (absolute, {}, 'abs'), (power, {'exponent': 2}, 'power_2'),
+    (signed_power, {'exponent': 2}, 'signed_power_2'), (log1p, {}, 'log1p'),
+    (signed_log1p, {}, 'signed_log1p'), (clip, {'lower': 0}, 'clip_0_None'),
+])
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_elementwise_all_missing_does_not_block_other_feature(function, kwargs, suffix, backend):
+    """Should transform a valid feature when another is entirely missing."""
+    frame = pd.DataFrame({'empty': [np.nan, np.nan], 'x': [0., 1.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    result = function(frame, ['empty', 'x'], **kwargs)
+    assert np.isnan(result[f'empty_{suffix}'].to_numpy().astype(float)).all()
+    assert np.isfinite(result[f'x_{suffix}'].to_numpy().astype(float)).all()
+
+
+@pytest.mark.parametrize('function,kwargs', [
+    (sign, {}), (absolute, {}), (power, {'exponent': 2}),
+    (signed_power, {'exponent': 2}), (log1p, {}),
+    (signed_log1p, {}), (clip, {'lower': 0}),
+])
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('infinite', [np.inf, -np.inf])
+def test_elementwise_transformations_reject_infinite_inputs(function, kwargs, backend, infinite):
+    """Should reject either infinity for each public elementwise operation."""
+    frame = pd.DataFrame({'x': [1., infinite]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with pytest.raises(ValueError, match='finite'):
+        function(frame, 'x', **kwargs)
 
 
 # ------------------------------------------------------
@@ -508,7 +731,6 @@ def test_elementwise_transformations_support_multiple_features(
         (pd.DataFrame({'x': [1.0]}), 'missing', KeyError, 'missing required'),
         (pd.DataFrame({'x': ['a']}), 'x', ValueError, 'numeric'),
         (pd.DataFrame({'x': [np.inf]}), 'x', ValueError, 'finite'),
-        (pd.DataFrame({'x': [np.nan]}), 'x', ValueError, 'missing all'),
     ],
 )
 def test_validate_elementwise_features_rejects_invalid_inputs(
@@ -602,7 +824,6 @@ def test_elementwise_transformations_reject_duplicate_dataframe_columns():
     [
         (pl.DataFrame({'x': [True, False]}), 'numeric'),
         (pl.DataFrame({'x': [1.0, np.inf]}), 'finite'),
-        (pl.DataFrame({'x': [None, None]}, schema={'x': pl.Float64}), 'missing all'),
     ],
 )
 def test_elementwise_transformations_validate_invalid_polars_features(
