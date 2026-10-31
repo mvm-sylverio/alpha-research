@@ -12,6 +12,103 @@ from alpha_research.features.interactions import (
 )
 
 
+@pytest.mark.parametrize('function,kwargs,column', [
+    (feature_ratio, {'denominator_feature': 'y'}, 'x_div_y'),
+    (feature_product, {'other_feature': 'y'}, 'x_mul_y'),
+    (feature_difference, {'subtract_feature': 'y'}, 'x_minus_y'),
+    (feature_where, {'condition_feature': 'y', 'operator': 'greater', 'threshold': 0}, 'x_where_y_greater_0'),
+])
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_interaction_rejects_existing_output_without_mutation(function, kwargs, column, backend):
+    """Should reject output collisions before computing any interaction."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [1., 2.], 'y': [1., 2.], column: [9., 9.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    original = frame.copy() if backend == 'pandas' else frame.clone()
+    with pytest.raises(ValueError, match=column):
+        function(frame, 'x', **kwargs)
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(frame, original)
+    else:
+        assert frame.equals(original)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_interactions_support_entirely_missing_operands_and_native_nan(backend):
+    """Should isolate missing operands and apply fallback for missing conditions."""
+    data = {'time': [1, 2, 3], 'symbol': ['A'] * 3,
+            'x': [None, None, None], 'z': [2., 4., 6.], 'y': [1., float('nan'), None]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    product = feature_product(frame, ['x', 'z'], 'y')
+    assert list(product.columns) == list(frame.columns) + ['x_mul_y', 'z_mul_y']
+    np.testing.assert_allclose(product['x_mul_y'].to_numpy().astype(float), [np.nan] * 3, equal_nan=True)
+    np.testing.assert_allclose(product['z_mul_y'].to_numpy().astype(float), [2., np.nan, np.nan], equal_nan=True)
+    where = feature_where(frame, ['x', 'z'], 'y', 'greater', 0)
+    np.testing.assert_allclose(where['x_where_y_greater_0'].to_numpy().astype(float), [np.nan, 0., 0.], equal_nan=True)
+    np.testing.assert_allclose(where['z_where_y_greater_0'].to_numpy().astype(float), [2., 0., 0.], equal_nan=True)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('function,kwargs,column', [
+    (feature_ratio, {'denominator_feature': 'y'}, 'x_div_y'),
+    (feature_product, {'other_feature': 'y'}, 'x_mul_y'),
+    (feature_difference, {'subtract_feature': 'y'}, 'x_minus_y'),
+])
+def test_interaction_all_missing_right_operand(backend, function, kwargs, column):
+    """Should return missing arithmetic results for an entirely missing operand."""
+    data = {'time': [1, 2], 'symbol': ['A', 'A'], 'x': [1., 2.], 'y': [None, None]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    values = function(frame, 'x', **kwargs)[column].to_numpy().astype(float)
+    assert np.isnan(values).all()
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('function,kwargs,x,y', [
+    (feature_ratio, {'denominator_feature': 'y'}, 1e308, 1e-308),
+    (feature_product, {'other_feature': 'y'}, 1e308, 1e308),
+    (feature_difference, {'subtract_feature': 'y'}, 1e308, -1e308),
+])
+def test_interaction_rejects_overflow(backend, function, kwargs, x, y):
+    """Should reject non-finite arithmetic results from finite operands."""
+    frame = pd.DataFrame({'time': [1], 'symbol': ['A'], 'x': [x], 'y': [y]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with np.errstate(over='ignore', divide='ignore'), pytest.raises(ValueError, match='finite'):
+        function(frame, 'x', **kwargs)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ratio_negative_zero_and_missing_denominator(backend):
+    """Should treat signed zero as zero and ignore missing values under strict policy."""
+    data = {'time': [1, 2, 3], 'symbol': ['A'] * 3, 'x': [1., 2., 3.], 'y': [-0., np.nan, 2.]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    with pytest.raises(ValueError, match='zero'):
+        feature_ratio(frame, 'x', 'y', zero_policy='raise')
+    values = feature_ratio(frame, 'x', 'y')['x_div_y'].to_numpy().astype(float)
+    np.testing.assert_allclose(values, [np.nan, np.nan, 1.5], equal_nan=True)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_interaction_batch_collision_with_another_input(backend):
+    """Should reject an output that is also a selected input feature."""
+    frame = pd.DataFrame({'time': [1], 'symbol': ['A'], 'x': [2.],
+                          'x_mul_y': [3.], 'y': [4.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with pytest.raises(ValueError, match='x_mul_y'):
+        feature_product(frame, ['x', 'x_mul_y'], 'y')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_interaction_integer_operands_do_not_wrap_on_multiplication(backend):
+    """Should compute large integer products without signed-integer wraparound."""
+    frame = pd.DataFrame({'time': [1], 'symbol': ['A'], 'x': [2**40], 'y': [2**30]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    value = feature_product(frame, 'x', 'y')['x_mul_y'].to_list()[0]
+    assert value == pytest.approx(float(2**70))
+
+
 @pytest.fixture
 def interaction_frame_pandas():
     """Create aligned observations for generic pairwise feature operations."""

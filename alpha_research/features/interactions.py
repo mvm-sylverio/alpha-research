@@ -1,7 +1,14 @@
+"""Combine aligned features without overwriting output columns.
+
+Arithmetic interactions reject infinite results from finite operands. Missing
+operands remain missing; an entirely missing feature does not invalidate other
+features. Conditional interactions use the configured fallback for missing
+conditions.
+"""
+
 from numbers import Real
 from typing import Literal
 
-import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -10,7 +17,12 @@ from alpha_research._utils import (
     _validate_finite_number,
     _validate_unique_keys,
 )
-from alpha_research.features.transformations import _normalize_feature_cols
+from alpha_research.features.transformations import (
+    _normalize_feature_cols,
+    _polars_feature_values,
+    _validate_elementwise_features,
+    _validate_output_columns,
+)
 
 __all__ = [
     'feature_difference',
@@ -97,7 +109,7 @@ def _validate_interaction_inputs(
         raise ValueError('DataFrame must not contain duplicate column names.')
 
     required_cols = [time_col, symbol_col, *features, other_feature]
-    _validate_df(df, required_cols)
+    _validate_df(df, required_cols, check_all_missing=False)
     _validate_unique_keys(df, [time_col, symbol_col], 'df')
 
     for key in [time_col, symbol_col]:
@@ -111,26 +123,7 @@ def _validate_interaction_inputs(
         if has_missing:
             raise ValueError(f'{key} must not contain missing values.')
 
-    for feature in [*features, other_feature]:
-        series = df[feature]
-        if isinstance(df, pd.DataFrame):
-            if (
-                    not pd.api.types.is_numeric_dtype(series)
-                    or pd.api.types.is_bool_dtype(series)
-                    or pd.api.types.is_complex_dtype(series)
-            ):
-                raise ValueError(f'{feature} must be real numeric and non-boolean.')
-            values = series.dropna().to_numpy(dtype=float)
-            has_infinite = bool(np.isinf(values).any())
-        else:
-            if not series.dtype.is_numeric():
-                raise ValueError(f'{feature} must be numeric.')
-            values = series.drop_nulls()
-            has_infinite = (
-                bool(values.is_infinite().any()) if values.dtype.is_float() else False
-            )
-        if has_infinite:
-            raise ValueError(f'{feature} must contain only finite or missing values.')
+    _validate_elementwise_features(df, [*features, other_feature])
 
     return features
 
@@ -184,31 +177,36 @@ def feature_ratio(
     )
     if zero_policy not in {'null', 'raise'}:
         raise ValueError("zero_policy must be 'null' or 'raise'.")
+    _validate_output_columns(df, features, f'div_{denominator_feature}')
 
     denominator = df[denominator_feature]
     if isinstance(df, pd.DataFrame):
         has_zero = bool(denominator.eq(0).fillna(False).any())
     else:
-        has_zero = bool(denominator.eq(0).fill_null(False).any())
+        has_zero = bool(denominator.cast(pl.Float64).eq(0).fill_null(False).any())
     if zero_policy == 'raise' and has_zero:
         raise ValueError('denominator_feature must not contain zero values.')
 
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
-            values = result[feature] / denominator
+            values = pd.to_numeric(result[feature]) / pd.to_numeric(denominator)
             result[f'{feature}_div_{denominator_feature}'] = values.where(
                 denominator.ne(0),
             )
+        _validate_elementwise_features(result, [f'{feature}_div_{denominator_feature}' for feature in features])
         return result
 
-    return df.with_columns([
-        pl.when(pl.col(denominator_feature) != 0)
-        .then(pl.col(feature) / pl.col(denominator_feature))
+    denominator_expr = _polars_feature_values(df, denominator_feature)
+    result = df.with_columns([
+        pl.when(denominator_expr != 0)
+        .then(_polars_feature_values(df, feature) / denominator_expr)
         .otherwise(None)
         .alias(f'{feature}_div_{denominator_feature}')
         for feature in features
     ])
+    _validate_elementwise_features(result, [f'{feature}_div_{denominator_feature}' for feature in features])
+    return result
 
 
 def feature_product(
@@ -254,19 +252,23 @@ def feature_product(
         symbol_col,
         time_col,
     )
+    _validate_output_columns(df, features, f'mul_{other_feature}')
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
             result[f'{feature}_mul_{other_feature}'] = (
-                result[feature] * result[other_feature]
+                pd.to_numeric(result[feature]).astype(float) * pd.to_numeric(result[other_feature]).astype(float)
             )
+        _validate_elementwise_features(result, [f'{feature}_mul_{other_feature}' for feature in features])
         return result
-    return df.with_columns([
-        (pl.col(feature) * pl.col(other_feature)).alias(
+    result = df.with_columns([
+        (_polars_feature_values(df, feature).cast(pl.Float64) * _polars_feature_values(df, other_feature).cast(pl.Float64)).alias(
             f'{feature}_mul_{other_feature}',
         )
         for feature in features
     ])
+    _validate_elementwise_features(result, [f'{feature}_mul_{other_feature}' for feature in features])
+    return result
 
 
 def feature_difference(
@@ -317,19 +319,23 @@ def feature_difference(
         symbol_col,
         time_col,
     )
+    _validate_output_columns(df, features, f'minus_{subtract_feature}')
     if isinstance(df, pd.DataFrame):
         result = df.copy()
         for feature in features:
             result[f'{feature}_minus_{subtract_feature}'] = (
-                result[feature] - result[subtract_feature]
+                pd.to_numeric(result[feature]).astype(float) - pd.to_numeric(result[subtract_feature]).astype(float)
             )
+        _validate_elementwise_features(result, [f'{feature}_minus_{subtract_feature}' for feature in features])
         return result
-    return df.with_columns([
-        (pl.col(feature) - pl.col(subtract_feature)).alias(
+    result = df.with_columns([
+        (_polars_feature_values(df, feature).cast(pl.Float64) - _polars_feature_values(df, subtract_feature).cast(pl.Float64)).alias(
             f'{feature}_minus_{subtract_feature}',
         )
         for feature in features
     ])
+    _validate_elementwise_features(result, [f'{feature}_minus_{subtract_feature}' for feature in features])
+    return result
 
 
 def feature_where(
@@ -405,9 +411,10 @@ def feature_where(
         None if otherwise is None else _validate_finite_number(otherwise, 'otherwise')
     )
     output_suffix = f'where_{condition_feature}_{operator}_{threshold}'
+    _validate_output_columns(df, features, output_suffix)
 
     if isinstance(df, pd.DataFrame):
-        condition_values = df[condition_feature]
+        condition_values = pd.to_numeric(df[condition_feature])
         comparisons = {
             'greater': condition_values.gt(normalized_threshold),
             'greater_equal': condition_values.ge(normalized_threshold),
@@ -425,7 +432,7 @@ def feature_where(
             )
         return result
 
-    condition_values = pl.col(condition_feature).fill_nan(None)
+    condition_values = _polars_feature_values(df, condition_feature)
     comparisons = {
         'greater': condition_values > normalized_threshold,
         'greater_equal': condition_values >= normalized_threshold,
@@ -437,7 +444,7 @@ def feature_where(
     condition = comparisons[operator].fill_null(False)
     return df.with_columns([
         pl.when(condition)
-        .then(pl.col(feature))
+        .then(_polars_feature_values(df, feature))
         .otherwise(normalized_otherwise)
         .alias(f'{feature}_{output_suffix}')
         for feature in features
