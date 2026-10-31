@@ -1,5 +1,4 @@
 import numpy as np
-import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
@@ -10,12 +9,61 @@ from alpha_research.features.volatility import (
     _feature_result_frame,
     _format_annualization_factor,
     _true_range_by_symbol,
+    _valid_ohlc_values,
     _validate_annualization_factor,
     _wilder_smoothing_by_symbol,
     average_true_range,
     atr,
     realized_volatility,
 )
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_valid_ohlc_values_masks_each_invalid_bar(backend):
+    """Should mask invalid OHLC bars while retaining all valid bars."""
+    frame = pd.DataFrame({'high': [12., 8., np.inf, 12., 12.],
+                          'low': [10., 9., 10., 0., 10.],
+                          'close': [11., 9., 11., 11., -1.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    for values in _valid_ohlc_values(frame, 'high', 'low', 'close'):
+        assert np.isfinite(values[0])
+        assert np.isnan(values[1:]).all()
+    with pytest.raises(KeyError):
+        _valid_ohlc_values(frame, 'missing', 'low', 'close')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_valid_ohlc_values_rejects_non_numeric_columns(backend):
+    """Should reject OHLC text that cannot be converted to numeric values."""
+    frame = pd.DataFrame({'high': ['bad'], 'low': [1.], 'close': [1.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with pytest.raises((TypeError, ValueError)):
+        _valid_ohlc_values(frame, 'high', 'low', 'close')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('invalid', [0., -1., np.nan, np.inf, -np.inf])
+def test_atr_invalid_close_resets_and_reseeds(backend, invalid):
+    """Should restart ATR after an invalid bar without using its close as a lag."""
+    frame = pd.DataFrame({'time': range(8), 'symbol': ['A'] * 8,
+                          'high': [12.] * 8, 'low': [10.] * 8,
+                          'close': [11., 11., 11., invalid, 11., 11., 11., 11.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    result = average_true_range(frame, 2, normalize=False)['atr_2'].to_numpy()
+    np.testing.assert_allclose(result, [np.nan, 2., 2., np.nan, np.nan, 2., 2., 2.], equal_nan=True)
+
+
+@pytest.mark.parametrize('window', [1, 3, 9])
+def test_atr_window_boundaries(window):
+    """Should seed exactly after a complete window and never before it."""
+    frame = pd.DataFrame({'time': range(4), 'symbol': ['A'] * 4,
+                          'high': [12.] * 4, 'low': [10.] * 4, 'close': [11.] * 4})
+    values = average_true_range(frame, window, normalize=False)[f'atr_{window}'].to_numpy()
+    expected = [np.nan if index < window - 1 else 2. for index in range(4)]
+    np.testing.assert_allclose(values, expected, equal_nan=True)
 
 
 @pytest.fixture
@@ -105,13 +153,24 @@ def test_wilder_smoothing_by_symbol_seeds_recurses_and_resets_after_missing():
         symbols=['AAPL', 'MSFT', 'AAPL', 'MSFT', 'AAPL', 'MSFT', 'AAPL', 'MSFT'],
         window=3,
     )
-
     np.testing.assert_allclose(
         result,
         [np.nan, np.nan, np.nan, np.nan, 2.0, np.nan, 3.0, np.nan],
         equal_nan=True,
     )
 
+
+@pytest.mark.parametrize('position', [0, 1, 2, 4])
+def test_wilder_smoothing_reseeds_only_after_full_finite_run(position):
+    """Should restart the seed after missing values at any smoothing stage."""
+    values = np.array([1., 2., 3., 4., 5., 6., 7., 8., 9.])
+    values[position] = np.nan
+    result = _wilder_smoothing_by_symbol(values, ['A'] * len(values), 3)
+    start = position + 1
+    assert np.isnan(result[position])
+    assert np.isnan(result[start:start + 2]).all()
+    if start + 2 < len(values):
+        assert result[start + 2] == pytest.approx(np.mean(values[start:start + 3]))
 
 # ------------------------------------------------------
 # _average_true_range_values

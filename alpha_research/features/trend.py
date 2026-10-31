@@ -3,10 +3,12 @@ import polars as pl
 import numpy as np
 
 from alpha_research._utils import _validate_df, _validate_positive_integer
+from alpha_research.features.targets import _as_numpy_values, _valid_price_expression, _validate_and_group_times
 from alpha_research.features.volatility import (
     _asset_positions,
     _average_true_range_values,
     _feature_result_frame,
+    _valid_ohlc_values,
     _wilder_smoothing_by_symbol,
 )
 
@@ -56,19 +58,24 @@ def price_to_sma_ratio(
     TypeError
         If df is not pandas or polars type.
     """
-    _validate_df(df, [time_col, symbol_col, price_col])
+    _validate_df(df, [time_col, symbol_col, price_col], check_all_missing=False)
+    _validate_positive_integer(window, 'window')
+    _validate_and_group_times(_as_numpy_values(df, symbol_col), _as_numpy_values(df, time_col), symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
-        sma = df.groupby(symbol_col)[price_col].transform(lambda x: x.rolling(window).mean())
+        price = pd.to_numeric(df[price_col], errors='raise').astype(float)
+        price = price.where(np.isfinite(price) & (price > 0))
+        sma = price.groupby(df[symbol_col]).transform(lambda x: x.rolling(window).mean())
         result = df[[time_col, symbol_col]].copy()
-        result[f'price_to_sma_ratio_{window}'] = df[price_col] / sma - 1
+        result[f'price_to_sma_ratio_{window}'] = price / sma - 1
         return result
 
     else:  # polars DataFrame
+        price = _valid_price_expression(price_col)
         return df.select([
             time_col,
             symbol_col,
-            (pl.col(price_col) / pl.col(price_col).rolling_mean(window).over(symbol_col) - 1)
+            (price / price.rolling_mean(window).over(symbol_col) - 1)
             .alias(f'price_to_sma_ratio_{window}')
         ])
 
@@ -115,23 +122,29 @@ def sma_crossover(
     TypeError
         If df is not pandas or polars type.
     """
-    _validate_df(df, [time_col, symbol_col, price_col])
+    _validate_df(df, [time_col, symbol_col, price_col], check_all_missing=False)
+    _validate_positive_integer(fast_window, 'fast_window')
+    _validate_positive_integer(slow_window, 'slow_window')
+    _validate_and_group_times(_as_numpy_values(df, symbol_col), _as_numpy_values(df, time_col), symbol_col, time_col)
 
     if fast_window >= slow_window:
         raise ValueError(f'fast_window ({fast_window}) must be smaller than slow_window ({slow_window}).')
 
     if isinstance(df, pd.DataFrame):
-        fast_sma = df.groupby(symbol_col)[price_col].transform(lambda x: x.rolling(fast_window).mean())
-        slow_sma = df.groupby(symbol_col)[price_col].transform(lambda x: x.rolling(slow_window).mean())
+        price = pd.to_numeric(df[price_col], errors='raise').astype(float)
+        price = price.where(np.isfinite(price) & (price > 0))
+        fast_sma = price.groupby(df[symbol_col]).transform(lambda x: x.rolling(fast_window).mean())
+        slow_sma = price.groupby(df[symbol_col]).transform(lambda x: x.rolling(slow_window).mean())
         result = df[[time_col, symbol_col]].copy()
         result[f'sma_{fast_window}_crossover_sma_{slow_window}'] = fast_sma / slow_sma - 1
         return result
     else:  # polars DataFrame
+        price = _valid_price_expression(price_col)
         return df.select([
             time_col,
             symbol_col,
-            (pl.col(price_col).rolling_mean(fast_window).over(symbol_col) /
-             pl.col(price_col).rolling_mean(slow_window).over(symbol_col) - 1)
+            (price.rolling_mean(fast_window).over(symbol_col) /
+             price.rolling_mean(slow_window).over(symbol_col) - 1)
             .alias(f'sma_{fast_window}_crossover_sma_{slow_window}')
         ])
 
@@ -186,13 +199,14 @@ def average_directional_index(
     the Directional Index. Its first value requires two full smoothing periods
     after the beginning of an asset's valid OHLC history. ADX measures trend
     strength only; price-to-SMA and SMA-crossover features can supply direction.
+    Invalid OHLC bars reset smoothing and directional history. A valid bar has
+    positive finite high, low, and close, with high at least low.
     """
-    _validate_df(df, [time_col, symbol_col, high_col, low_col, close_col])
+    _validate_df(df, [time_col, symbol_col, high_col, low_col, close_col], check_all_missing=False)
     _validate_positive_integer(window, 'window')
+    _validate_and_group_times(_as_numpy_values(df, symbol_col), _as_numpy_values(df, time_col), symbol_col, time_col)
 
-    high = np.asarray(df[high_col].to_numpy(), dtype=float)
-    low = np.asarray(df[low_col].to_numpy(), dtype=float)
-    close = np.asarray(df[close_col].to_numpy(), dtype=float)
+    high, low, close = _valid_ohlc_values(df, high_col, low_col, close_col)
     symbols = df[symbol_col].to_list()
     plus_directional_movement = np.full(len(df), np.nan, dtype=float)
     minus_directional_movement = np.full(len(df), np.nan, dtype=float)

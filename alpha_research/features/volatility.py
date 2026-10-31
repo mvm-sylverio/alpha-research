@@ -5,12 +5,43 @@ import polars as pl
 from alpha_research._utils import _validate_df, _validate_positive_integer
 from alpha_research.features.returns import log_returns
 from alpha_research.features.schema import get_feature_name
+from alpha_research.features.targets import _as_numpy_values, _validate_and_group_times
 
 __all__ = [
     'realized_volatility',
     'average_true_range',
     'atr',
 ]
+
+
+def _valid_ohlc_values(df, high_col, low_col, close_col):
+    """Extract OHLC prices and mask invalid bars.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Input frame containing OHLC prices.
+    high_col, low_col, close_col : str
+        Price column names.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, np.ndarray]
+        Float arrays with invalid bars replaced by NaN.
+
+    Raises
+    ------
+    TypeError, ValueError
+        If a price column cannot be converted to numeric values.
+    KeyError
+        If a price column is absent.
+    """
+    _validate_df(df, [high_col, low_col, close_col], check_all_missing=False)
+    values = [np.asarray(df[column].to_numpy(), dtype=float) for column in (high_col, low_col, close_col)]
+    high, low, close = values
+    valid = np.isfinite(high) & np.isfinite(low) & np.isfinite(close)
+    valid &= (high > 0) & (low > 0) & (close > 0) & (high >= low)
+    return tuple(np.where(valid, value, np.nan) for value in values)
 
 
 def _validate_annualization_factor(
@@ -325,9 +356,10 @@ def realized_volatility(
     returns requires W + 1 observed prices before the first non-missing value.
     The sample standard deviation uses ``ddof=1``.
     """
-    _validate_df(df, [time_col, symbol_col, price_col])
+    _validate_df(df, [time_col, symbol_col, price_col], check_all_missing=False)
     _validate_positive_integer(window, 'window')
     _validate_annualization_factor(annualization_factor)
+    _validate_and_group_times(_as_numpy_values(df, symbol_col), _as_numpy_values(df, time_col), symbol_col, time_col)
 
     if window == 1:
         raise ValueError('window must be greater than one for sample volatility.')
@@ -434,15 +466,17 @@ def average_true_range(
     of the first full True Range window and subsequently follows Wilder's
     recursive smoothing. Normalized ATR is expressed as a fraction, not a
     percentage. Zero or missing close values produce missing normalized values.
+    Invalid OHLC bars reset smoothing and the previous close; a valid bar has
+    positive finite high, low, and close, with high at least low. The first
+    valid bar after a gap uses its intrabar range to restart the sequence.
     """
-    _validate_df(df, [time_col, symbol_col, high_col, low_col, close_col])
+    _validate_df(df, [time_col, symbol_col, high_col, low_col, close_col], check_all_missing=False)
     _validate_positive_integer(window, 'window')
+    _validate_and_group_times(_as_numpy_values(df, symbol_col), _as_numpy_values(df, time_col), symbol_col, time_col)
     if not isinstance(normalize, bool):
         raise TypeError('normalize must be a boolean.')
 
-    high = np.asarray(df[high_col].to_numpy(), dtype=float)
-    low = np.asarray(df[low_col].to_numpy(), dtype=float)
-    close = np.asarray(df[close_col].to_numpy(), dtype=float)
+    high, low, close = _valid_ohlc_values(df, high_col, low_col, close_col)
     symbols = df[symbol_col].to_list()
     atr = _average_true_range_values(high, low, close, symbols, window)
 
