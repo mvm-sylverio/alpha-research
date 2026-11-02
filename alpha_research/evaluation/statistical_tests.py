@@ -118,6 +118,51 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
     )
 
 
+def _newey_west_with_continuity(reference: pd.DataFrame | pl.DataFrame, observations: pd.DataFrame | pl.DataFrame, date_column: str, value_column: str):
+    """Compute Newey-West inference only for contiguous observed dates.
+
+    Parameters
+    ----------
+    reference : DataFrame
+        Input observations defining the ordered sequence of available dates.
+    observations : DataFrame
+        Finite observations indexed by date.
+    date_column, value_column : str
+        Names of the date and value columns.
+
+    Returns
+    -------
+    tuple[NWTestResult, str]
+        Inference and its status: ok, undefined, or internal_gap.
+
+    Raises
+    ------
+    ValueError
+        If observation dates are duplicated or absent from the reference sequence.
+    KeyError
+        If a selected column is absent.
+    """
+    for frame, columns in ((reference, [date_column]), (observations, [date_column, value_column])):
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise KeyError(f'missing required columns in DataFrame: {missing}.')
+    reference_dates = sorted(set(reference[date_column].to_list()))
+    positions = {date: index for index, date in enumerate(reference_dates)}
+    dates = observations[date_column].to_list()
+    if len(set(dates)) != len(dates) or any(date not in positions for date in dates):
+        raise ValueError('Observation dates must be unique and present in the reference dates.')
+    indices = sorted(positions[date] for date in dates)
+    if indices and indices[-1] - indices[0] + 1 != len(indices):
+        return NWTestResult(t_stat=np.nan, p_value=np.nan), 'internal_gap'
+    if len(indices) < 2:
+        return NWTestResult(t_stat=np.nan, p_value=np.nan), 'undefined'
+    ordered = (observations.sort_values(date_column) if isinstance(observations, pd.DataFrame)
+               else observations.sort(date_column))
+    result = newey_west_tstat(ordered[value_column])
+    status = 'ok' if np.isfinite(result.t_stat) and np.isfinite(result.p_value) else 'undefined'
+    return result, status
+
+
 # ------------------------------------------------------
 # Temporal association null-hypothesis test
 # ------------------------------------------------------

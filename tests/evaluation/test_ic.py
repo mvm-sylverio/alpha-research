@@ -2,6 +2,7 @@ import pytest
 import numpy as np
 import pandas as pd
 import polars as pl
+from math import erf, erfc, sqrt
 from alpha_research.evaluation.ic import (
     compute_ic,
     compute_ic_metrics,
@@ -15,8 +16,389 @@ from alpha_research.evaluation.ic import (
     PartialICSummaryResult,
     partial_ic_summary_table,
     partial_information_coefficient,
+    _validate_ic_keys,
 )
 from alpha_research.evaluation.partial import partial_correlation
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('missing', [None, float('nan')], ids=['null', 'nan'])
+@pytest.mark.parametrize('method', ['pearson', 'spearman'])
+def test_missing_pairs_propagate_consistently_through_ic_and_decay(backend, missing, method):
+    """Should use only the two complete pairs through the full IC and decay pipeline."""
+    features = {'time': [1, 1, 1, 1], 'symbol': ['A', 'B', 'C', 'D'],
+                'x': [1., missing, 3., 4.]}
+    targets = {'time': [1, 1, 1, 1], 'symbol': ['A', 'B', 'C', 'D'],
+               'y': [1., 2., 3., missing]}
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    feature_frame, target_frame = make(features), make(targets)
+    joined = make({'time': features['time'], 'symbol': features['symbol'],
+                   'x': features['x'], 'y': targets['y']})
+    direct = compute_ic(joined, 'x', 'y', method, symbol_column='symbol')
+    summary = ic_summary_table(joined, ['x'], 'y', method, symbol_column='symbol')
+    decay = ic_decay(feature_frame, 'x', target_frame, [1], lambda data, horizon: data,
+                     corr_method=method)
+    assert direct['ic'].to_list() == pytest.approx([1.])
+    assert summary.ic_frames['x']['ic'].to_list() == pytest.approx([1.])
+    assert decay.ic_frames[1]['ic'].to_list() == pytest.approx([1.])
+    assert decay.table['n_obs'].to_list() == [1]
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('breadth,expected', [(0, []), (1, []), (2, [1.])])
+def test_ic_cross_section_complete_pair_minimum(backend, breadth, expected):
+    """Should require two complete nonconstant observations in each cross-section."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    frame = make({'time': [1, 1, 1], 'symbol': ['A', 'B', 'C'],
+                  'x': [float(i) if i < breadth else None for i in range(3)],
+                  'y': [1., 2., 3.]})
+    result = compute_ic(frame, 'x', 'y', symbol_column='symbol')
+    assert result['ic'].to_list() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('bad_horizon', [0, -1, 1.5, True, None, float('nan'), '2'])
+def test_decay_summary_rejects_invalid_horizon_matrix(backend, bad_horizon):
+    """Should reject nonpositive, noninteger, boolean, and missing horizons."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    frame = make({'horizon': [bad_horizon], 'mean': [0.2], 'fdr_rejected': [False]})
+    with pytest.raises((ValueError, TypeError)):
+        ic_decay_summary(frame)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('case', ['missing_time', 'missing_symbol', 'missing_value', 'extra_value',
+                                 'duplicate', 'null_key', 'other_backend'])
+def test_decay_rejects_malformed_generated_targets(backend, case):
+    """Should reject malformed target schemas, invalid keys, and backend mismatch."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    features = make({'time': [1, 1], 'symbol': ['A', 'B'], 'x': [1., 2.]})
+    data = {'time': [1, 1], 'symbol': ['A', 'B'], 'y': [1., 2.]}
+    if case == 'missing_time':
+        del data['time']
+    elif case == 'missing_symbol':
+        del data['symbol']
+    elif case == 'missing_value':
+        del data['y']
+    elif case == 'extra_value':
+        data['extra'] = [1., 2.]
+    elif case == 'duplicate':
+        data['symbol'] = ['A', 'A']
+    elif case == 'null_key':
+        data['symbol'] = ['A', None]
+    target = (pl.DataFrame(data) if backend == 'pandas' else pd.DataFrame(data)) if case == 'other_backend' else make(data)
+    with pytest.raises((KeyError, ValueError, TypeError)):
+        ic_decay(features, 'x', features, [1], lambda frame, horizon: target)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('missing', [None, float('nan')], ids=['null', 'nan'])
+def test_partial_ic_missing_values_and_minimum_breadth(backend, missing):
+    """Should require four complete observations for a single covariate."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    z, r, s = [-1., -1., 1., 1.], [-1., 1., -1., 1.], [-1., 1., 1., -1.]
+    frame = make({'time': [1] * 5 + [2] * 4, 'symbol': list('ABCDE') + list('ABCD'),
+                  'z': z + [missing] + z, 'x': [a + b for a, b in zip(z, r)] + [3.] + [1., 2., 3., missing],
+                  'y': [2*a + b/2 + c for a, b, c in zip(z, r, s)] + [4.] + [1., 2., 3., 4.]})
+    result = partial_information_coefficient(frame, 'x', 'y', 'z', corr_method='pearson', symbol_column='symbol')
+    assert result['time'].to_list() == [1]
+    assert result['partial_ic'].to_list() == pytest.approx([1 / sqrt(5)])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_public_outputs_schema_and_input_nonmutation(backend):
+    """Should preserve input frames and return stable column order and date/numeric types."""
+    z, r = [-1., -1., 1., 1.], [-1., 1., -1., 1.]
+    rows = [{'time': day, 'symbol': str(i), 'x': z[i] + r[i], 'z': z[i],
+             'y': 2*z[i] + (r[i] if day != 2 else -r[i])}
+            for day in (1, 2, 3) for i in range(4)]
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    frame = make(rows)
+    before = frame.copy(deep=True) if backend == 'pandas' else frame.clone()
+    target = frame[['time', 'symbol', 'y']]
+    target_before = target.copy(deep=True) if backend == 'pandas' else target.clone()
+    ordinary = compute_ic(frame, 'x', 'y', 'pearson', symbol_column='symbol')
+    partial = partial_information_coefficient(frame, 'x', 'y', 'z', 'pearson', symbol_column='symbol')
+    summary = ic_summary_table(frame, ['x'], 'y', 'pearson', symbol_column='symbol')
+    partial_summary = partial_ic_summary_table(frame, ['x'], 'y', 'z', 'pearson', symbol_column='symbol')
+    decay = ic_decay(frame, 'x', target, [1], lambda data, horizon: data, corr_method='pearson')
+    decay_batch = ic_decay_summary_table(frame, ['x'], target, [1], lambda data, horizon: data,
+                                         corr_method='pearson')
+    curve_before = decay.table.copy(deep=True) if backend == 'pandas' else decay.table.clone()
+    ic_decay_summary(decay.table)
+    metrics_input = ordinary['ic'].copy() if backend == 'pandas' else ordinary['ic'].clone()
+    compute_ic_metrics(ordinary['ic'])
+    assert list(ordinary.columns) == ['time', 'ic']
+    assert list(partial.columns) == ['time', 'partial_ic']
+    assert list(summary.table.columns) == ['feature', 'mean', 'abs_mean', 'sign', 'std', 'stability',
+                                           'pct_positive', 'quantile25', 'quantile50', 'quantile75',
+                                           't_stat', 'p_value', 'nw_status', 'feature_group', 'n_obs']
+    assert list(partial_summary.table.columns) == list(summary.table.columns) + ['covariates']
+    assert list(decay_batch.table.columns) == ['feature', 'peak_horizon', 'peak_abs_ic', 'halflife_horizon',
+                                               'last_significant_horizon', 'auc', 'feature_group']
+    for result, name in [(ordinary, 'ic'), (partial, 'partial_ic'), (decay.ic_frames[1], 'ic')]:
+        if backend == 'pandas':
+            assert result['time'].dtype == frame['time'].dtype
+            assert result[name].dtype == np.dtype('float64')
+        else:
+            assert result.schema == {'time': frame.schema['time'], name: pl.Float64}
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(frame, before)
+        pd.testing.assert_frame_equal(target, target_before)
+        pd.testing.assert_frame_equal(decay.table, curve_before)
+        pd.testing.assert_series_equal(ordinary['ic'], metrics_input)
+    else:
+        assert frame.equals(before) and target.equals(target_before) and decay.table.equals(curve_before)
+        assert ordinary['ic'].equals(metrics_input)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_all_undefined_decay_horizons_preserve_output_contract(backend):
+    """Should retain every horizon and return undefined diagnostics when all ICs are undefined."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    features = make({'time': [1, 1], 'symbol': ['A', 'B'], 'x': [1., 1.]})
+    targets = make({'time': [1, 1], 'symbol': ['A', 'B'], 'y': [1., 2.]})
+    result = ic_decay_summary_table(features, ['x'], targets, [1, 2], lambda data, horizon: data)
+    table = result.decay_results['x'].table
+    assert table['horizon'].to_list() == [1, 2]
+    assert table['n_obs'].to_list() == [0, 0]
+    assert table['nw_status'].to_list() == ['undefined', 'undefined']
+    assert table['fdr_rejected'].to_list() == [False, False]
+    assert all(len(frame) == 0 for frame in result.decay_results['x'].ic_frames.values())
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_empty_ic_output_preserves_date_and_float_schema(backend):
+    """Should preserve timezone and float dtype when no paired IC can be computed."""
+    frame = pd.DataFrame({'time': pd.to_datetime(['2024-01-01', '2024-01-02'], utc=True),
+                          'x': [1., None], 'y': [None, 2.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    result = compute_ic(frame, 'x', 'y')
+    assert len(result) == 0 and list(result.columns) == ['time', 'ic']
+    if backend == 'pandas':
+        assert result['time'].dtype == frame['time'].dtype
+        assert result['ic'].dtype == np.dtype('float64')
+    else:
+        assert result.schema == {'time': frame.schema['time'], 'ic': pl.Float64}
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('column', ['x', 'y', 'z'])
+@pytest.mark.parametrize('invalid', ['text', float('inf')], ids=['nonnumeric', 'infinity'])
+def test_partial_ic_rejects_invalid_selected_values(backend, column, invalid):
+    """Should reject nonnumeric and infinite feature, target, and covariate values."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    data = {'time': [1] * 4, 'x': [1., 2., 3., 4.], 'y': [1., 3., 2., 4.], 'z': [0., 1., 0., 1.]}
+    data[column] = [invalid] * 4
+    with pytest.raises(ValueError):
+        partial_information_coefficient(make(data), 'x', 'y', 'z')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_validate_ic_keys_enforces_numeric_values_dates_and_optional_identity(backend):
+    """Should validate IC keys and finite values without requiring an asset column."""
+    frame = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    valid = frame({'time': [1, 1], 'symbol': ['A', 'B'], 'x': [1., None]})
+    assert _validate_ic_keys(valid, ['x'], 'time', 'symbol') is None
+    for data, symbol, message in [
+        ({'time': [1, None], 'x': [1., 2.]}, None, 'missing'),
+        ({'time': [1, 1], 'symbol': ['A', 'A'], 'x': [1., 2.]}, 'symbol', 'unique'),
+        ({'time': [1, 1], 'x': [1., float('inf')]}, None, 'finite'),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            _validate_ic_keys(frame(data), ['x'], 'time', symbol)
+    with pytest.raises(KeyError):
+        _validate_ic_keys(valid, ['absent'], 'time', None)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('undefined_date,expected_status', [(1, 'ok'), (3, 'internal_gap'), (5, 'ok')])
+def test_ic_summary_keeps_reference_dates_for_newey_west(backend, undefined_date, expected_status):
+    """Should suppress inference only when an undefined IC separates valid dates."""
+    x = [-3., -1., 1., 3.]
+    y = [x, [3., 1., -1., -3.], [1., -3., 3., -1.], x, [3., 1., -1., -3.]]
+    rows = [{'time': date, 'symbol': str(i), 'x': value,
+             'y': 1. if date == undefined_date else y[date - 1][i]}
+            for date in range(1, 6) for i, value in enumerate(x)]
+    frame = pd.DataFrame(rows) if backend == 'pandas' else pl.DataFrame(rows)
+    result = ic_summary_table(frame, ['x'], 'y', 'pearson', symbol_column='symbol')
+    row = result.table.to_dicts()[0] if backend == 'polars' else result.table.iloc[0].to_dict()
+    assert row['n_obs'] == 4
+    assert row['nw_status'] == expected_status
+    if expected_status == 'internal_gap':
+        assert np.isnan(row['t_stat']) and np.isnan(row['p_value'])
+    else:
+        assert np.isfinite(row['t_stat']) and np.isfinite(row['p_value'])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_decay_end_to_end_matches_hand_derived_hac_and_bh(backend):
+    """Should match manually derived Pearson ICs, Bartlett HAC, and BH correction."""
+    # Pearson ICs are [1, 0, -1] and [1, 1, -1]. For the latter,
+    # lag-one Bartlett HAC gives t = 3/sqrt(20), and BH across both p-values
+    # corrects the smaller p-value by a factor of two (capped at one).
+    x = [-3., -1., 1., 3.]
+    orthogonal = [1., -3., 3., -1.]
+    inverse = [-v for v in x]
+    first = [x, orthogonal, inverse]
+    second = [x, x, inverse]
+    features = [{'time': d + 1, 'symbol': str(i), 'feature': value}
+                for d in range(3) for i, value in enumerate(x)]
+    targets = [{'time': d + 1, 'symbol': str(i), 'target_1': first[d][i],
+                'target_2': second[d][i]} for d in range(3) for i in range(4)]
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    target_fn = lambda frame, horizon: frame[['time', 'symbol', f'target_{horizon}']]
+    result = ic_decay(constructor(features), 'feature', constructor(targets), [2, 1], target_fn,
+                      corr_method='pearson')
+    rows = result.table.to_dicts() if backend == 'polars' else result.table.to_dict('records')
+    assert [row['horizon'] for row in rows] == [1, 2]
+    assert [row['mean'] for row in rows] == pytest.approx([0., 1 / 3])
+    assert [row['t_stat'] for row in rows] == pytest.approx([0., 3 / sqrt(20)], abs=1e-12)
+    p_value = 1 - erf((3 / sqrt(20)) / sqrt(2))
+    assert [row['p_value'] for row in rows] == pytest.approx([1., p_value])
+    assert [row['fdr_corrected_p_value'] for row in rows] == pytest.approx([1., min(1., 2 * p_value)])
+    assert [row['nw_status'] for row in rows] == ['ok', 'ok']
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_gap_and_key_validation(backend):
+    """Should suppress inference for an undefined interior date and validate partial IC inputs."""
+    # z and r are orthogonal to each other and to the intercept, so the
+    # residual feature is r and residual targets are r, zero, and -r.
+    z = [-1., -1., 1., 1.]
+    r = [-1., 1., -1., 1.]
+    rows = [{'time': date, 'symbol': str(i), 'z': z[i], 'x': z[i] + r[i],
+             'y': 2 * z[i] + (r[i] if date == 1 else -r[i]) if date != 2 else 1.}
+            for date in range(1, 4) for i in range(4)]
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    frame = constructor(rows)
+    result = partial_ic_summary_table(frame, ['x'], 'y', 'z', corr_method='pearson', symbol_column='symbol')
+    assert result.partial_ic_frames['x']['partial_ic'].to_list() == pytest.approx([1., -1.])
+    row = result.table.to_dicts()[0] if backend == 'polars' else result.table.iloc[0].to_dict()
+    assert row['nw_status'] == 'internal_gap'
+    assert np.isnan(row['t_stat']) and np.isnan(row['p_value'])
+    bad_rows = [dict(row) for row in rows]
+    bad_rows[1]['symbol'] = '0'
+    with pytest.raises(ValueError, match='unique'):
+        partial_information_coefficient(constructor(bad_rows), 'x', 'y', 'z', symbol_column='symbol')
+    bad_rows[1]['symbol'] = '1'
+    bad_rows[0]['z'] = float('inf')
+    with pytest.raises(ValueError, match='finite'):
+        partial_information_coefficient(constructor(bad_rows), 'x', 'y', 'z')
+    with pytest.raises(ValueError, match='corr_method'):
+        partial_information_coefficient(frame, 'x', 'y', 'z', corr_method='invalid')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_matches_nonperfect_orthogonal_residuals_with_missing(backend):
+    """Should match an analytical partial correlation and exclude only incomplete pairs."""
+    # z, r, and s are pairwise orthogonal to the intercept and each other.
+    # Residual x is r; residual y is r/2+s, whose correlation is 1/sqrt(5).
+    z = [-1., -1., 1., 1.]
+    r = [-1., 1., -1., 1.]
+    s = [-1., 1., 1., -1.]
+    data = {'time': [1] * 5, 'z': z + [None],
+            'x': [a + b for a, b in zip(z, r)] + [1.],
+            'y': [2 * a + b / 2 + c for a, b, c in zip(z, r, s)] + [2.]}
+    if backend == 'pandas':
+        frame = pd.DataFrame(data).astype({'z': 'Float64', 'x': 'Float64', 'y': 'Float64'})
+    else:
+        frame = pl.DataFrame(data)
+    result = partial_information_coefficient(frame, 'x', 'y', 'z', corr_method='pearson')
+    assert result['partial_ic'].to_list() == pytest.approx([1 / sqrt(5)])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_empty_output_preserves_date_type_and_input(backend):
+    """Should preserve the timestamp schema and input when every partial IC is undefined."""
+    frame = pd.DataFrame({'time': pd.to_datetime(['2024-01-01'] * 3, utc=True),
+                          'x': [1., 2., 3.], 'y': [1., 2., 3.], 'z': [1., 1., 1.]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    before = frame.copy(deep=True) if backend == 'pandas' else frame.clone()
+    result = partial_information_coefficient(frame, 'x', 'y', 'z')
+    assert list(result.columns) == ['time', 'partial_ic']
+    assert len(result) == 0
+    if backend == 'pandas':
+        assert result['time'].dtype == frame['time'].dtype
+        assert result['partial_ic'].dtype == np.dtype('float64')
+        pd.testing.assert_frame_equal(frame, before)
+    else:
+        assert result.schema == {'time': frame.schema['time'], 'partial_ic': pl.Float64}
+        assert frame.equals(before)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_rejects_invalid_parameters_and_missing_keys(backend):
+    """Should reject malformed partial IC specifications before processing dates."""
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    data = {'time': [1, 1, 1, 1], 'symbol': ['A', 'B', 'C', None],
+            'x': [1., 2., 3., 4.], 'y': [2., 3., 1., 4.], 'z': [0., 1., 0., 1.]}
+    frame = constructor(data)
+    with pytest.raises(ValueError, match='missing'):
+        partial_information_coefficient(frame, 'x', 'y', 'z', symbol_column='symbol')
+    with pytest.raises((ValueError, TypeError), match='min_n'):
+        partial_information_coefficient(frame, 'x', 'y', 'z', min_n=1.5)
+    with pytest.raises(ValueError, match='differ'):
+        partial_information_coefficient(frame, 'x', 'y', 'z', ic_column='time')
+    with pytest.raises(KeyError):
+        partial_information_coefficient(frame, 'x', 'y', 'absent')
+    data['time'][1] = None
+    with pytest.raises(ValueError, match='missing'):
+        partial_information_coefficient(constructor(data), 'x', 'y', 'z')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_decay_detects_dates_lost_in_target_join(backend):
+    """Should use feature dates as the reference even when a target date has no matches."""
+    features = [{'time': date, 'symbol': str(i), 'x': float(i)}
+                for date in range(1, 4) for i in range(4)]
+    targets = [{'time': date, 'symbol': str(i), 'target': float(i if date == 1 else -i)}
+               for date in (1, 3) for i in range(4)]
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    result = ic_decay(constructor(features), 'x', constructor(targets), [1],
+                      lambda frame, horizon: frame, corr_method='pearson')
+    row = result.table.to_dicts()[0] if backend == 'polars' else result.table.iloc[0].to_dict()
+    assert row['n_obs'] == 2
+    assert row['nw_status'] == 'internal_gap'
+    assert row['fdr_rejected'] is False or not row['fdr_rejected']
+    assert row['p_value'] is None or np.isnan(row['p_value'])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_decay_fdr_corrects_the_two_horizons_as_one_family(backend):
+    """Should match hand-derived Bartlett HAC p-values and two-test BH correction."""
+    # IC_1 alternates +1 and -1; IC_2 is +1 nineteen times, then -1.
+    # With n=20 and two Bartlett lags, residual cross-products give
+    # variance numerator 283/75 and t = 18/sqrt(283/75).
+    x = [-3., -1., 1., 3.]
+    features = [{'time': d, 'symbol': str(i), 'feature': value, 'other': value}
+                for d in range(1, 21) for i, value in enumerate(x)]
+    targets = [{'time': d, 'symbol': str(i),
+                'target_1': value * (1 if d % 2 else -1),
+                'target_2': value * (1 if d < 20 else -1)}
+               for d in range(1, 21) for i, value in enumerate(x)]
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    result = ic_decay(constructor(features), 'feature', constructor(targets), [1, 2],
+                      lambda frame, horizon: frame[['time', 'symbol', f'target_{horizon}']],
+                      corr_method='pearson')
+    rows = result.table.to_dicts() if backend == 'polars' else result.table.to_dict('records')
+    expected_t = 18 / sqrt(283 / 75)
+    expected_p = erfc(expected_t / sqrt(2))
+    assert rows[1]['t_stat'] == pytest.approx(expected_t)
+    assert rows[1]['p_value'] == pytest.approx(expected_p, rel=1e-10, abs=0)
+    assert rows[1]['fdr_corrected_p_value'] == pytest.approx(2 * expected_p, rel=1e-10, abs=0)
+    assert rows[1]['fdr_rejected']
+    assert not rows[0]['fdr_rejected']
+    batch = ic_decay_summary_table(constructor(features), ['feature', 'other'], constructor(targets),
+                                   [1, 2],
+                                   lambda frame, horizon: frame[['time', 'symbol', f'target_{horizon}']],
+                                   corr_method='pearson')
+    for name in ('feature', 'other'):
+        table = batch.decay_results[name].table
+        corrected = table['fdr_corrected_p_value'].to_list()
+        assert corrected[1] == pytest.approx(2 * expected_p, rel=1e-10, abs=0)
 
 
 # ------------------------------------------------------
@@ -637,7 +1019,7 @@ def test_ic_summary_table_columns(cross_section_df_pandas):
     result = ic_summary_table(cross_section_df_pandas, ['feature'], 'target').table
     expected = {'feature', 'mean', 'abs_mean', 'sign', 'std', 'stability',
                 'pct_positive', 'quantile25', 'quantile50', 'quantile75',
-                't_stat', 'p_value', 'feature_group', 'n_obs'}
+                't_stat', 'p_value', 'nw_status', 'feature_group', 'n_obs'}
     assert set(result.columns) == expected
 
 

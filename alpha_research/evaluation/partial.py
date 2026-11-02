@@ -203,7 +203,7 @@ def partial_correlation(
     _validate_df(df, columns, check_all_missing=False)
     try:
         values = (
-            df[columns].to_numpy(dtype=float)
+            df[columns].to_numpy(dtype=float, na_value=np.nan)
             if isinstance(df, pd.DataFrame)
             else df.select(columns).to_numpy().astype(float, copy=False)
         )

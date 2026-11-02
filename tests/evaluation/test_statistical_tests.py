@@ -7,6 +7,7 @@ from scipy.stats import norm
 from alpha_research.evaluation.statistical_tests import (
     ADFTestResult,
     NWTestResult,
+    _newey_west_with_continuity,
     WaldTemporalAssociationTestResult,
     adf_test,
     benjamini_hochberg,
@@ -181,6 +182,26 @@ def test_nw_returns_nwtestresult(strong_positive_ic_series):
 # ------------------------------------------------------
 # newey_west_tstat
 # ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_newey_west_with_continuity_validates_dates_and_identifies_internal_gaps(backend):
+    """Should detect only internal gaps and reject unknown or duplicated IC dates."""
+    frame = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    reference = frame({'time': [1, 2, 3, 4, 5]})
+    gap = frame({'time': [2, 4], 'ic': [1., -1.]})
+    result, status = _newey_west_with_continuity(reference, gap, 'time', 'ic')
+    assert status == 'internal_gap'
+    assert np.isnan(result.t_stat) and np.isnan(result.p_value)
+    contiguous = frame({'time': [4, 2, 3], 'ic': [-1., 1., 0.]})
+    result, status = _newey_west_with_continuity(reference, contiguous, 'time', 'ic')
+    assert status == 'ok'
+    assert result.t_stat == pytest.approx(0.)
+    for dates in ([2, 2], [2, 6]):
+        with pytest.raises(ValueError, match='unique and present'):
+            _newey_west_with_continuity(reference, frame({'time': dates, 'ic': [1., -1.]}), 'time', 'ic')
+    with pytest.raises(KeyError):
+        _newey_west_with_continuity(reference, gap, 'missing', 'ic')
+
+
 def test_nw_constant_series_returns_nan(constant_ic_series):
     """Should return nan t_stat and p_value for constant IC series."""
     result = newey_west_tstat(constant_ic_series)
