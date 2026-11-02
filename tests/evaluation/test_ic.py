@@ -33,17 +33,13 @@ def test_compute_ic_retains_known_native_values(cross_section_df_pandas, backend
 
 @pytest.mark.parametrize('backend', ['pandas', 'polars'])
 def test_ic_preserves_undefined_date_semantics(backend):
-    """Should preserve native handling of undefined constant cross-sections."""
+    """Should omit undefined constant cross-sections on both backends."""
     frame = pd.DataFrame({'time': [1, 1, 2, 2], 'feature': [1., 2., 1., 1.], 'target': [1., 2., 3., 4.]})
     if backend == 'polars':
         frame = pl.from_pandas(frame)
     result = compute_ic(frame, 'feature', 'target')
     assert result['ic'][0] == pytest.approx(1.0)
-    # Pandas omits NaN; Polars retains its established native NaN semantics.
-    if backend == 'polars':
-        assert np.isnan(result['ic'][1])
-    else:
-        assert len(result) == 1
+    assert len(result) == 1
 
 
 @pytest.mark.parametrize('backend', ['pandas', 'polars'])
@@ -176,21 +172,18 @@ def test_native_ic_retains_ties_custom_columns_and_utc(backend, method, expected
 @pytest.mark.parametrize('method', ['pearson', 'spearman'])
 @pytest.mark.parametrize('values', [[], [None, None], [float('nan'), 2.], [1., 1.], [1., 2.]])
 def test_polars_ic_preserves_native_null_and_nan_semantics(method, values):
-    """Should retain validation and native handling of nulls, NaNs, and constant values."""
+    """Should omit cross-sections without two nonconstant complete pairs."""
     frame = pl.DataFrame({'time': [1] * len(values), 'x': values, 'y': [1., 2.][:len(values)]},
                           schema={'time': pl.Int64, 'x': pl.Float64, 'y': pl.Float64})
-    if not values or all(value is None for value in values):
+    if not values:
         with pytest.raises(ValueError):
             compute_ic(frame, 'x', 'y', method)
         return
     result = compute_ic(frame, 'x', 'y', method)
-    if np.isnan(values[0]) and method == 'spearman':
-        # Native NaN ordering ranks NaN above 2, opposite to the target order.
-        assert result['ic'].to_list() == pytest.approx([-1.0])
-    elif np.isnan(values[0]) or values[0] == values[1]:
-        assert np.isnan(result['ic'][0])
-    else:
+    if values == [1., 2.]:
         assert result['ic'].to_list() == pytest.approx([1.0])
+    else:
+        assert result.is_empty()
 
 
 def test_polars_ic_preserves_empty_joint_pairs_schema():
@@ -199,6 +192,124 @@ def test_polars_ic_preserves_empty_joint_pairs_schema():
     result = compute_ic(frame, 'x', 'y')
     assert result.schema == {'time': pl.Int64, 'ic': pl.Float64}
     assert result.is_empty()
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('method', ['pearson', 'spearman'])
+def test_ic_ignores_missing_pairs_and_rejects_duplicate_keys(backend, method):
+    """Should calculate the known correlation from complete pairs and validate asset identity."""
+    data = {'time': [1, 1, 1], 'symbol': ['A', 'B', 'C'],
+            'x': [1., float('nan'), 3.], 'y': [1., 2., 3.]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    assert compute_ic(frame, 'x', 'y', method, symbol_column='symbol')['ic'].to_list() == pytest.approx([1.])
+    data['symbol'][1] = 'A'
+    duplicate = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    with pytest.raises(ValueError, match='unique'):
+        compute_ic(duplicate, 'x', 'y', method, symbol_column='symbol')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_summary_rejects_duplicate_asset_keys_when_requested(backend):
+    """Should apply the asset identity contract to each summary feature."""
+    data = {'time': [1, 1], 'symbol': ['A', 'A'], 'x': [1., 2.], 'y': [1., 2.]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    with pytest.raises(ValueError, match='unique'):
+        ic_summary_table(frame, ['x'], 'y', symbol_column='symbol')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_metrics_uses_only_valid_values(backend):
+    """Should use two valid observations for every scalar and preserve missing positions."""
+    series = pd.Series([0.1, np.nan, -0.2]) if backend == 'pandas' else pl.Series([0.1, None, -0.2])
+    metrics = compute_ic_metrics(series)
+    assert metrics.mean == pytest.approx(-0.05)
+    assert metrics.abs_mean == pytest.approx(0.15)
+    assert metrics.pct_positive == pytest.approx(0.5)
+    assert len(metrics.adjusted_series) == 3
+    with pytest.raises(ValueError, match='finite'):
+        compute_ic_metrics(pd.Series([0.1, np.inf]))
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_decay_summary_rejects_fractional_horizons(backend):
+    """Should reject fractional horizons before they can be truncated."""
+    data = {'horizon': [1.2, 2.4], 'mean': [.2, .1], 'fdr_rejected': [False, True]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    with pytest.raises(ValueError, match='positive integers'):
+        ic_decay_summary(frame)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_decay_summary_rejects_missing_significance_flags(backend):
+    """Should reject missing significance flags instead of interpreting them as true."""
+    data = {'horizon': [1, 2], 'mean': [.2, .1], 'fdr_rejected': [False, None]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    with pytest.raises(ValueError, match='boolean'):
+        ic_decay_summary(frame)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_rejects_infinite_values_and_missing_dates(backend):
+    """Should reject nonfinite inputs and missing dates for either backend."""
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    with pytest.raises(ValueError, match='finite'):
+        compute_ic(constructor({'time': [1, 1], 'x': [1., np.inf], 'y': [1., 2.]}), 'x', 'y')
+    with pytest.raises(ValueError, match='missing'):
+        compute_ic(constructor({'time': [1, None], 'x': [1., 2.], 'y': [1., 2.]}), 'x', 'y')
+
+
+def test_ic_invalid_method_on_constant_input():
+    """Should reject an invalid correlation method even for constant inputs."""
+    with pytest.raises(ValueError, match='corr_method'):
+        information_coefficient(pd.Series([1., 1.]), pd.Series([1., 2.]), 'invalid')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_ic_summary_all_missing_feature_does_not_block_others(backend):
+    """Should retain an undefined feature and calculate the other feature independently."""
+    data = {'time': [1, 1, 2, 2], 'missing': [None] * 4,
+            'feature': [1., 2., 2., 1.], 'target': [1., 2., 1., 2.]}
+    frame = pd.DataFrame(data) if backend == 'pandas' else pl.DataFrame(data)
+    result = ic_summary_table(frame, ['missing', 'feature'], 'target')
+    assert len(result.ic_frames['missing']) == 0
+    assert result.ic_frames['feature']['ic'].to_list() == pytest.approx([1., -1.])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_decay_summary_all_missing_feature_does_not_block_others(backend):
+    """Should preserve undefined decay diagnostics while calculating the valid feature."""
+    features = {'time': [1, 1, 2, 2], 'symbol': ['A', 'B', 'A', 'B'],
+                'missing': [None] * 4, 'feature': [1., 2., 2., 1.]}
+    targets = {'time': [1, 1, 2, 2], 'symbol': ['A', 'B', 'A', 'B'],
+               'target': [1., 2., 1., 2.]}
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    result = ic_decay_summary_table(constructor(features), ['missing', 'feature'],
+                                    constructor(targets), [1], lambda frame, horizon: frame)
+    assert len(result.decay_results['missing'].ic_frames[1]) == 0
+    assert result.decay_results['feature'].ic_frames[1]['ic'].to_list() == pytest.approx([1., -1.])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_decay_without_matching_keys_returns_undefined_results(backend):
+    """Should return an empty IC series when feature and target keys do not overlap."""
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    features = constructor({'time': [1, 1], 'symbol': ['A', 'B'], 'feature': [1., 2.]})
+    targets = constructor({'time': [2, 2], 'symbol': ['A', 'B'], 'target': [1., 2.]})
+    result = ic_decay(features, 'feature', targets, [1], lambda frame, horizon: frame)
+    assert len(result.ic_frames[1]) == 0
+    mean = result.table['mean'][0]
+    assert mean is None or np.isnan(mean)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_partial_ic_summary_all_missing_feature_does_not_block_others(partial_ic_data_pandas, backend):
+    """Should retain an undefined partial IC feature and compute a valid feature."""
+    frame = partial_ic_data_pandas.assign(missing=np.nan)
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    result = partial_ic_summary_table(frame, ['missing', 'feature'], 'target', 'covariate_a')
+    assert len(result.partial_ic_frames['missing']) == 0
+    assert len(result.partial_ic_frames['feature']) == 8
 
 
 # ------------------------------------------------------

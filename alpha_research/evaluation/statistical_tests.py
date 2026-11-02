@@ -468,7 +468,8 @@ def fdr_correction(
     Summary tables should not have different run performance in polars
     and pandas. Therefore, everything is transformed to pandas for code simplicity.
     """
-    _validate_df(df, [p_value_column, feature_group_column])
+    _validate_df(df, [feature_group_column])
+    _validate_df(df, [p_value_column], check_all_missing=False)
 
     if isinstance(df, pd.DataFrame):
         return _fdr_correction_pandas(df, fdr, method, p_value_column, feature_group_column)

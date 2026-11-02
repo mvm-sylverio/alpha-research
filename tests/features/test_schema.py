@@ -87,6 +87,17 @@ def test_get_feature_name_invalid_type_raises():
 # ------------------------------------------------------
 # join_feature_target_frames
 # ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_join_can_allow_all_missing_values(backend):
+    """Should allow an entirely missing value column when explicitly requested."""
+    constructor = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    features = constructor({'time': [1], 'symbol': ['A'], 'x': [None]})
+    targets = constructor({'time': [1], 'symbol': ['A'], 'y': [1.]})
+    result = join_feature_target_frames(features, targets, 'x', 'y', 'time', 'symbol',
+                                        check_all_missing=False)
+    assert len(result) == 0
+
+
 def test_join_feature_target_frames_pandas_keeps_only_matched_valid_rows(
         pandas_feature_df,
         pandas_target_df,

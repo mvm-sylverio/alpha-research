@@ -69,6 +69,8 @@ def join_feature_target_frames(
         target_col: str,
         time_col: str,
         symbol_col: str,
+        *,
+        check_all_missing: bool = True,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Join a feature and target DataFrame on time and symbol keys.
@@ -92,6 +94,8 @@ def join_feature_target_frames(
         Name of the time join key in both DataFrames.
     symbol_col : str
         Name of the symbol join key in both DataFrames.
+    check_all_missing : bool, default True
+        Whether to reject value columns containing only missing values.
 
     Returns
     -------
@@ -119,8 +123,8 @@ def join_feature_target_frames(
     keys = [time_col, symbol_col]
 
     # check DataFrames validity - general, same backend and uniqueness of keys
-    _validate_df(feature_df, keys + [feature_col])
-    _validate_df(target_df, keys + [target_col])
+    _validate_df(feature_df, keys + [feature_col], check_all_missing=check_all_missing)
+    _validate_df(target_df, keys + [target_col], check_all_missing=check_all_missing)
 
     _validate_same_backend(feature_df, target_df)
 
