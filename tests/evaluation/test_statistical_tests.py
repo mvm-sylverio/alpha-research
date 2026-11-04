@@ -7,6 +7,7 @@ from scipy.stats import norm
 from alpha_research.evaluation.statistical_tests import (
     ADFTestResult,
     NWTestResult,
+    _contiguous_numeric_series,
     _newey_west_with_continuity,
     WaldTemporalAssociationTestResult,
     adf_test,
@@ -17,6 +18,254 @@ from alpha_research.evaluation.statistical_tests import (
     stationarity_test,
     wald_temporal_association_test,
 )
+
+
+@pytest.mark.parametrize('n,lag', [(5, 2), (20, 2), (100, 4)])
+def test_newey_west_bandwidth_and_hac_against_scalar_reference(n, lag):
+    """Should select the documented lag and match independently summed Bartlett covariances."""
+    values = np.array([float((i * 7) % 11) / 10 for i in range(n)])
+    mean = sum(values) / n
+    residuals = values - mean
+    numerator = sum(v * v for v in residuals)
+    for k in range(1, lag + 1):
+        numerator += 2 * (1 - k / (lag + 1)) * sum(residuals[i] * residuals[i-k] for i in range(k, n))
+    expected = mean / np.sqrt(numerator / n**2)
+    result = newey_west_tstat(pd.Series(values))
+    assert result.t_stat == pytest.approx(expected)
+    assert result.p_value == pytest.approx(2 * norm.sf(abs(expected)))
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_adf_trims_endpoints_and_uses_effective_length(backend):
+    """Should preserve ADF results after trimming missing endpoints and count valid observations."""
+    make = pd.Series if backend == 'pandas' else pl.Series
+    values = np.random.default_rng(123).normal(size=40).tolist()
+    baseline = adf_test(make(values))
+    trimmed = adf_test(make([None] + values + [None]))
+    assert trimmed.t_stat == pytest.approx(baseline.t_stat)
+    assert trimmed.p_value == pytest.approx(baseline.p_value)
+    with pytest.raises(ValueError, match='40 < 41'):
+        adf_test(make([None] + values + [None]), minimum_observations=41)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('n', [0, 1])
+def test_continuity_helper_short_series_has_undefined_inference(backend, n):
+    """Should return undefined inference without calculating HAC for fewer than two values."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    reference = make({'time': [1]})
+    observations = make({'time': [1][:n], 'ic': [1.][:n]})
+    if backend == 'pandas':
+        observations = observations.astype({'time': 'int64', 'ic': 'float64'})
+    else:
+        observations = observations.cast({'time': pl.Int64, 'ic': pl.Float64})
+    result, status = _newey_west_with_continuity(reference, observations, 'time', 'ic')
+    assert status == 'undefined'
+    assert np.isnan(result.t_stat) and np.isnan(result.p_value)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('parameter,value', [('fdr', 0), ('fdr', True), ('method', 'invalid')])
+def test_fdr_validates_arguments_on_all_missing_tests(backend, parameter, value):
+    """Should validate parameters even when every p-value is missing."""
+    frame = pd.DataFrame({'p_value': [np.nan], 'feature_group': ['g']})
+    if backend == 'polars':
+        frame = pl.DataFrame({'p_value': [None], 'feature_group': ['g']})
+    with pytest.raises(ValueError, match=parameter):
+        fdr_correction(frame, **{parameter: value})
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_statistical_apis_do_not_mutate_inputs(backend):
+    """Should leave statistical inputs unchanged after successful calculations."""
+    values = [float(i % 7) for i in range(40)]
+    series = pd.Series(values) if backend == 'pandas' else pl.Series(values)
+    before = series.copy() if backend == 'pandas' else series.clone()
+    newey_west_tstat(series)
+    adf_test(series)
+    if backend == 'pandas':
+        pd.testing.assert_series_equal(series, before)
+    else:
+        assert series.equals(before)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_contiguous_numeric_series_trims_only_missing_endpoints(backend):
+    """Should trim endpoints while rejecting internal missing and infinite values."""
+    make = pd.Series if backend == 'pandas' else pl.Series
+    assert _contiguous_numeric_series(make([None, 1., 2., None])).tolist() == [1., 2.]
+    assert len(_contiguous_numeric_series(make([None, None], dtype='float64' if backend == 'pandas' else pl.Float64))) == 0
+    with pytest.raises(ValueError, match='internal'):
+        _contiguous_numeric_series(make([1., None, 2.]))
+    with pytest.raises(ValueError, match='infinite'):
+        _contiguous_numeric_series(make([1., float('inf')]))
+    with pytest.raises(TypeError):
+        _contiguous_numeric_series(make(['1', '2']))
+    with pytest.raises(TypeError):
+        _contiguous_numeric_series([1., 2.])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_newey_west_matches_hand_calculated_bartlett_hac(backend):
+    """Should match a manual lag-one Bartlett covariance and Normal p-value."""
+    # Residuals for [1, 1, -1] are [2/3, 2/3, -4/3]. With one lag,
+    # HAC variance of the sample mean is 20/81, giving t = 3/sqrt(20).
+    make = pd.Series if backend == 'pandas' else pl.Series
+    result = newey_west_tstat(make([None, 1., 1., -1., None]))
+    assert result.t_stat == pytest.approx(3 / np.sqrt(20))
+    assert result.p_value == pytest.approx(0.5023349543605021)
+    with pytest.raises(ValueError, match='internal'):
+        newey_west_tstat(make([1., None, -1.]))
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('method,expected', [('bh', [2/75, .04, 2/75, 2/75]),
+                                               ('by', [1/18, 1/12, 1/18, 1/18])])
+def test_fdr_exact_unsorted_tied_reference(backend, method, expected):
+    """Should match hand-calculated BH and BY corrections in input order."""
+    # Sorted p = .01, .02, .02, .04; the reverse cumulative minimum of
+    # 4p/rank gives 2/75, 2/75, 2/75, .04. BY multiplies by 25/12.
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    frame = make({'p_value': [.01, .04, .02, .02], 'feature_group': ['g'] * 4})
+    result = fdr_correction(frame, method=method)
+    assert result['fdr_corrected_p_value'].to_list() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('value', [-.1, 1.2])
+def test_fdr_rejects_out_of_range_pvalues(backend, value):
+    """Should reject finite p-values outside the probability interval."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    with pytest.raises(ValueError, match='p-values'):
+        fdr_correction(make({'p_value': [value], 'feature_group': ['g']}))
+
+
+@pytest.mark.parametrize('fdr', [0, 1, -1, 2, True, float('nan')])
+def test_fdr_validates_alpha_even_without_finite_pvalues(fdr):
+    """Should validate FDR even when no finite test is available."""
+    with pytest.raises(ValueError, match='fdr'):
+        fdr_correction(pd.DataFrame({'p_value': [np.nan], 'feature_group': ['g']}), fdr=fdr)
+
+
+def test_fdr_rejects_invalid_method_and_missing_groups():
+    """Should reject invalid methods and missing group identity."""
+    with pytest.raises(ValueError, match='method'):
+        fdr_correction(pd.DataFrame({'p_value': [np.nan], 'feature_group': ['g']}), method='invalid')
+    with pytest.raises(ValueError, match='groups'):
+        fdr_correction(pd.DataFrame({'p_value': [.01, .02], 'feature_group': ['g', None]}))
+
+
+def test_fdr_preserves_duplicate_index_and_distinct_families():
+    """Should correct duplicate-index rows positionally without mixing families."""
+    frame = pd.DataFrame({'p_value': [.01, .9, .04], 'feature_group': ['a', 'b', 'a']}, index=[1, 1, 1])
+    result = fdr_correction(frame)
+    assert result.index.tolist() == [1, 1, 1]
+    assert result['fdr_corrected_p_value'].tolist() == pytest.approx([.02, .9, .04])
+
+
+def test_fdr_supports_mixed_group_types_without_sorting():
+    """Should keep numeric and string group identities as separate families."""
+    frame = pd.DataFrame({'p_value': [.01, .04, .9], 'feature_group': [1, 'group', 1]})
+    result = fdr_correction(frame)
+    assert result['fdr_corrected_p_value'].tolist() == pytest.approx([.02, .04, .9])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_fdr_rejects_missing_group_and_nonnumeric_values(backend):
+    """Should reject missing family identifiers and nonnumeric p-values on either backend."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    with pytest.raises(ValueError, match='groups'):
+        fdr_correction(make({'p_value': [.01, .02], 'feature_group': ['g', None]}))
+    with pytest.raises(ValueError, match='numeric'):
+        fdr_correction(make({'p_value': ['0.1'], 'feature_group': ['g']}))
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_adf_validates_continuity_and_parameters(backend):
+    """Should reject invalid ADF parameters, infinite values, and internal gaps."""
+    make = pd.Series if backend == 'pandas' else pl.Series
+    values = [float(i % 7) for i in range(40)]
+    for alpha in [0, 1, -1, True, np.nan]:
+        with pytest.raises(ValueError, match='significance_level'):
+            adf_test(make(values), significance_level=alpha)
+    for minimum in [0, -1, True, 2.5]:
+        with pytest.raises(ValueError, match='minimum_observations'):
+            adf_test(make(values), minimum_observations=minimum)
+    with pytest.raises(ValueError, match='internal'):
+        adf_test(make(values[:20] + [None] + values[20:]))
+    with pytest.raises(ValueError, match='infinite'):
+        adf_test(make(values + [float('inf')]))
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_adf_matches_independent_zero_lag_regression(backend):
+    """Should match the hand-derived intercept-and-lag OLS statistic when selected lag is zero."""
+    values = np.random.default_rng(123).normal(size=40)
+    x, y = values[:-1], np.diff(values)
+    # The ADF lag-zero regression is delta(x) = intercept + beta*x[t-1].
+    # Scalar centered OLS gives beta and its standard error without adfuller.
+    centered_x, centered_y = x - x.mean(), y - y.mean()
+    sxx = float(centered_x @ centered_x)
+    beta = float(centered_x @ centered_y) / sxx
+    residuals = centered_y - beta * centered_x
+    expected_t = beta / np.sqrt(float(residuals @ residuals) / (len(x) - 2) / sxx)
+    make = pd.Series if backend == 'pandas' else pl.Series
+    result = adf_test(make(values))
+    assert result.used_lags == 0
+    assert result.t_stat == pytest.approx(expected_t, rel=1e-12)
+    assert result.p_value < 1e-6
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_adf_pvalue_matches_published_stata_reference_at_same_statistic(backend):
+    """Should match the published Stata p-value for the same ADF statistic and deterministic term."""
+    # Stata's reference value is -4.3346988 -> .00038661 for regression='c'.
+    # The source uses a different dataset and one fixed lag; this synthetic
+    # series reaches the same statistic with the API's automatic lag selection.
+    # The MacKinnon p-value depends on the statistic and deterministic term.
+    # https://github.com/statsmodels/statsmodels/blob/main/statsmodels/tsa/tests/test_stattools.py
+    errors = np.random.default_rng(123).normal(size=100)
+    values = np.zeros(100)
+    for i in range(1, len(values)):
+        values[i] = .7478155123416262 * values[i-1] + errors[i]
+    make = pd.Series if backend == 'pandas' else pl.Series
+    result = adf_test(make(values))
+    assert result.used_lags == 0
+    assert result.t_stat == pytest.approx(-4.3346988, abs=1e-7)
+    assert result.p_value == pytest.approx(.00038661, abs=5e-9)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_continuity_helper_rejects_invalid_values_and_missing_dates(backend):
+    """Should validate its dates and observations before calculating inference."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    reference = make({'time': [1, 2]})
+    for values in ([1., None], [1., float('inf')]):
+        with pytest.raises(ValueError):
+            _newey_west_with_continuity(reference, make({'time': [1, 2], 'ic': values}), 'time', 'ic')
+    with pytest.raises(ValueError, match='dates'):
+        _newey_west_with_continuity(make({'time': [1, None]}), make({'time': [1], 'ic': [1.]}), 'time', 'ic')
+    with pytest.raises(TypeError):
+        _newey_west_with_continuity(reference, [], 'time', 'ic')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_continuity_helper_rejects_unhashable_date_keys(backend):
+    """Should reject list-valued date keys with a clear validation error."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    reference = make({'time': [[1], [2]]})
+    observations = make({'time': [[1]], 'ic': [1.]})
+    with pytest.raises(TypeError, match='dates must contain hashable values'):
+        _newey_west_with_continuity(reference, observations, 'time', 'ic')
+
+
+@pytest.mark.parametrize('argument', ['observed_association', 'bootstrap_standard_error', 'null_value'])
+def test_wald_rejects_boolean_numeric_arguments(argument):
+    """Should reject boolean values in numerical Wald parameters."""
+    values = {'observed_association': .2, 'bootstrap_standard_error': .1, 'null_value': 0.}
+    values[argument] = True
+    with pytest.raises(ValueError, match='non-boolean'):
+        wald_temporal_association_test(**values)
 
 
 # ------------------------------------------------------
