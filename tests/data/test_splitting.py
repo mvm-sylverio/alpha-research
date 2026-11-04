@@ -3,6 +3,8 @@ import warnings
 import pandas as pd
 import polars as pl
 from alpha_research.data.splitting import research_test_split
+from alpha_research.data.splitting import _split_dates
+import numpy as np
 
 
 # ------------------------------------------------------
@@ -143,15 +145,230 @@ def test_split_no_purge_zone_when_coefficient_is_one(large_df_pandas):
     df_research, df_test = research_test_split(large_df_pandas, purging_coefficient=1.0)
     research_end = df_research['time'].max()
     test_start = df_test['time'].min()
-    # no dates in between — difference should be minimal (next business day)
-    assert (test_start - research_end).days <= 5
+    assert research_end < test_start
+    assert sorted(pd.concat([df_research, df_test])['time'].tolist()) == sorted(large_df_pandas['time'].tolist())
 
 # multi asset
 def test_split_consistent_across_assets(multi_asset_df_pandas):
     """All assets should have the same cutoff date in both blocks."""
     df_research, df_test = research_test_split(multi_asset_df_pandas)
-    assert df_research['time'].max() == df_research.groupby('symbol')['time'].max().max()
-    assert df_test['time'].min() == df_test.groupby('symbol')['time'].min().min()
+    assert df_research.groupby('symbol')['time'].max().nunique() == 1
+    assert df_test.groupby('symbol')['time'].min().nunique() == 1
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('months,research_ids,test_ids', [(0, [0, 1, 2, 3, 4], [7, 8, 9]),
+                                                       (2, [0, 1, 2, 3, 4, 5], [7, 8, 9])])
+def test_split_exact_irregular_calendar(backend, months, research_ids, test_ids):
+    """Should retain exactly the hand-calculated dates under point and month cutoffs."""
+    # Last date Aug 1; three test points begin Jun 1. Purging six points
+    # ends research Mar 3. With two test months, four purged months end Apr 1.
+    dates = pd.to_datetime(['2024-01-01', '2024-01-07', '2024-02-01', '2024-03-01',
+                            '2024-03-03', '2024-04-01', '2024-05-01', '2024-06-01',
+                            '2024-07-01', '2024-08-01'])
+    frame = pd.DataFrame({'time': dates, 'id': range(10), 'value': [None] * 10})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    research, test = research_test_split(frame, purging_coefficient=2,
+        min_research_period=0, min_test_period=months, min_research_unique_pts=1,
+        min_test_unique_pts=3 if months == 0 else 2)
+    assert research['id'].to_list() == research_ids
+    assert test['id'].to_list() == test_ids
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_split_incomplete_assets_unsorted_duplicates_and_schema(backend):
+    """Should apply one global cutoff while retaining row order, duplicates, and schema."""
+    frame = pd.DataFrame({'time': pd.to_datetime(['2024-01-05', '2024-01-01', '2024-01-04',
+                                                  '2024-01-02', '2024-01-03', '2024-01-01']),
+                          'symbol': ['A', 'A', 'B', 'B', 'A', 'A'], 'id': range(6)})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    before = frame.copy(deep=True) if backend == 'pandas' else frame.clone()
+    research, test = research_test_split(frame, purging_coefficient=1, min_research_period=0,
+        min_test_period=0, min_research_unique_pts=1, min_test_unique_pts=2)
+    assert research['id'].to_list() == [1, 3, 4, 5]
+    assert test['id'].to_list() == [0, 2]
+    assert list(research.columns) == list(frame.columns)
+    if backend == 'pandas':
+        pd.testing.assert_frame_equal(frame, before)
+        assert research.dtypes.equals(frame.dtypes)
+    else:
+        assert frame.equals(before) and research.schema == frame.schema
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_split_purges_forward_label_information_intervals(backend):
+    """Should exclude research labels that reach the first test observation."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=8),
+                          'label_end': pd.date_range('2024-01-03', periods=8), 'id': range(8)})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    research, test = research_test_split(frame, purging_coefficient=1, min_research_period=0,
+        min_test_period=0, min_research_unique_pts=1, min_test_unique_pts=2, label_end_col='label_end')
+    assert research['id'].to_list() == [0, 1, 2, 3]
+    assert test['id'].to_list() == [6, 7]
+    assert research['label_end'].max() < test['time'].min()
+
+
+@pytest.mark.parametrize('name', ['min_research_period', 'min_test_period', 'min_research_unique_pts', 'min_test_unique_pts'])
+@pytest.mark.parametrize('value', [-1, True, 1.5, np.nan, np.inf])
+def test_split_rejects_invalid_minimum_parameters(large_df_pandas, name, value):
+    """Should reject invalid minimum parameters before selecting cutoffs."""
+    with pytest.raises(ValueError, match=name):
+        research_test_split(large_df_pandas, **{name: value})
+
+
+@pytest.mark.parametrize('value', [True, np.nan, np.inf, -np.inf, 1e308])
+def test_split_rejects_invalid_or_oversized_purge(large_df_pandas, value):
+    """Should reject nonfinite, boolean, and unrepresentable purge sizes clearly."""
+    expected_error = TypeError if value is True else ValueError
+    with pytest.raises(expected_error):
+        research_test_split(large_df_pandas, purging_coefficient=value)
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_split_date_helper_validation(backend):
+    """Should reject absent, missing, numeric, and textual date keys."""
+    make = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    for values in ([1, 2], ['2024-01-01', '2024-01-02']):
+        with pytest.raises(ValueError, match='datetime'):
+            _split_dates(make({'time': values}), 'time')
+    frame = pd.DataFrame({'time': pd.to_datetime(['2024-01-01', None])})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with pytest.raises(ValueError, match='missing'):
+        _split_dates(frame, 'time')
+    with pytest.raises(KeyError):
+        _split_dates(frame, 'absent')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('timezone', [None, 'UTC', 'America/New_York'])
+def test_split_dst_and_timezone_preservation(backend, timezone):
+    """Should split by observed dates across DST without changing timezone or order."""
+    dates = pd.date_range('2024-03-08 12:00', periods=6, tz=timezone)
+    frame = pd.DataFrame({'time': dates, 'id': range(6)})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    research, test = research_test_split(frame, purging_coefficient=1, min_research_period=0,
+        min_test_period=0, min_research_unique_pts=1, min_test_unique_pts=2)
+    assert research['id'].to_list() == [0, 1, 2, 3]
+    assert test['id'].to_list() == [4, 5]
+    if backend == 'pandas':
+        assert research['time'].dtype == frame['time'].dtype
+    else:
+        assert research.schema == frame.schema
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_split_leap_year_month_end_exact_rows(backend):
+    """Should place leap-day month-end observations in the test block exactly."""
+    frame = pd.DataFrame({'time': pd.to_datetime(['2023-12-31', '2024-01-31', '2024-02-28',
+                                                  '2024-02-29', '2024-03-31']), 'id': range(5)})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    research, test = research_test_split(frame, purging_coefficient=1, min_research_period=0,
+        min_test_period=1, min_research_unique_pts=1, min_test_unique_pts=1)
+    assert research['id'].to_list() == [0, 1, 2]
+    assert test['id'].to_list() == [3, 4]
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('invalid', ['missing', 'backward', 'timezone'])
+def test_split_rejects_invalid_label_intervals(backend, invalid):
+    """Should reject unknown, backward, and timezone-inconsistent label endpoints."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=5),
+                          'end': pd.date_range('2024-01-02', periods=5)})
+    if invalid == 'missing':
+        frame.loc[1, 'end'] = pd.NaT
+    elif invalid == 'backward':
+        frame.loc[1, 'end'] = pd.Timestamp('2023-01-01')
+    else:
+        frame['end'] = frame['end'].dt.tz_localize('UTC')
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    with pytest.raises(ValueError):
+        research_test_split(frame, min_research_period=0, min_test_period=0,
+                            min_research_unique_pts=1, min_test_unique_pts=1, label_end_col='end')
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_split_rejects_zero_point_minima_and_excessive_purge(backend):
+    """Should reject zero unique-date minima and purges exceeding available history."""
+    make = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=5)})
+    frame = make if backend == 'pandas' else pl.from_pandas(make)
+    for key in ('min_research_unique_pts', 'min_test_unique_pts'):
+        with pytest.raises(ValueError, match=key):
+            research_test_split(frame, **{key: 0})
+    with pytest.raises(ValueError, match='Research block too small'):
+        research_test_split(frame, purging_coefficient=10, min_research_period=0,
+                            min_test_period=0, min_research_unique_pts=1, min_test_unique_pts=1)
+
+
+@pytest.mark.parametrize('minimum,outcome', [(4, 'ok'), (8, 'warn'), (10, 'error')])
+def test_split_exact_research_minimum_thresholds(minimum, outcome):
+    """Should accept the recommendation, warn at half, and reject below half."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=6)})
+    kwargs = dict(purging_coefficient=1, min_research_period=0, min_test_period=0,
+                  min_research_unique_pts=minimum, min_test_unique_pts=2)
+    if outcome == 'error':
+        with pytest.raises(ValueError, match='Research block too small'):
+            research_test_split(frame, **kwargs)
+    elif outcome == 'warn':
+        with pytest.warns(UserWarning, match='smaller than recommended'):
+            research, _ = research_test_split(frame, **kwargs)
+        assert len(research) == 4
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            research, _ = research_test_split(frame, **kwargs)
+        assert len(research) == 4
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('research_count', [2, 3])
+def test_split_odd_point_minimum_uses_exact_half(backend, research_count):
+    """Should reject two research dates and allow three when the recommendation is five."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=research_count + 2)})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    kwargs = dict(purging_coefficient=1, min_research_period=0, min_test_period=0,
+                  min_research_unique_pts=5, min_test_unique_pts=2)
+    if research_count == 2:
+        with pytest.raises(ValueError, match='Minimum allowed: 3 dates'):
+            research_test_split(frame, **kwargs)
+    else:
+        with pytest.warns(UserWarning, match='smaller than recommended'):
+            research, test = research_test_split(frame, **kwargs)
+        assert len(research) == 3 and len(test) == 2
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('research_months', [2, 3])
+def test_split_odd_month_minimum_uses_exact_half(backend, research_months):
+    """Should reject two full months and allow three when the recommendation is five."""
+    # The final observation is test-only; Jan 1 through Mar 1 spans two
+    # full months, and Jan 1 through Apr 1 spans three full months.
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=research_months + 2, freq='MS')})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame)
+    kwargs = dict(purging_coefficient=1, min_research_period=5, min_test_period=0,
+                  min_research_unique_pts=1, min_test_unique_pts=1)
+    if research_months == 2:
+        with pytest.raises(ValueError, match=r'Minimum allowed: 1 dates \(3 months\)'):
+            research_test_split(frame, **kwargs)
+    else:
+        with pytest.warns(UserWarning, match='smaller than recommended'):
+            research, test = research_test_split(frame, **kwargs)
+        assert len(research) == 4 and len(test) == 1
+
+
+def test_split_date_helper_preserves_valid_precision():
+    """Should return timezone-aware nanosecond keys without rounding their values."""
+    dates = pd.date_range('2024-01-01', periods=3, freq='ns', tz='UTC')
+    for frame in (pd.DataFrame({'time': dates}), pl.from_pandas(pd.DataFrame({'time': dates}))):
+        pd.testing.assert_index_equal(_split_dates(frame, 'time'), pd.DatetimeIndex(dates, name='time'))
 
 # pandas / polars consistency
 def test_split_pandas_polars_consistency(large_df_pandas, large_df_polars):
