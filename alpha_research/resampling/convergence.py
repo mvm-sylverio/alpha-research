@@ -6,17 +6,18 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from alpha_research._utils import _validate_positive_integer
-
+from alpha_research._utils import _validate_finite_number, _validate_positive_integer
 from alpha_research.progress import (
-    ProgressCallback, _progress_iter, _report_progress, _validate_progress_callback,
+    ProgressCallback,
+    _progress_iter,
+    _report_progress,
+    _validate_progress_callback,
 )
 
-
 __all__ = [
-    'MonteCarloMetricDiagnostics',
-    'MonteCarloLevelDiagnostics',
     'MonteCarloErrorResult',
+    'MonteCarloLevelDiagnostics',
+    'MonteCarloMetricDiagnostics',
     'monte_carlo_error',
 ]
 
@@ -203,15 +204,12 @@ def _validate_tolerances(
         if not isinstance(metric_name, str) or not metric_name:
             raise ValueError(f'{name} metric names must be non-empty strings.')
 
-        if isinstance(tolerance, bool):
-            raise TypeError(f'{name} values must be numeric.')
-
         try:
-            numeric_tolerance = float(tolerance)
-        except (TypeError, ValueError) as error:
-            raise TypeError(f'{name} values must be numeric.') from error
+            numeric_tolerance = _validate_finite_number(tolerance, f'{name} values')
+        except (ValueError, OverflowError) as error:
+            raise ValueError(f'{name} values must be finite and non-negative.') from error
 
-        if not np.isfinite(numeric_tolerance) or numeric_tolerance < 0:
+        if numeric_tolerance < 0:
             raise ValueError(f'{name} values must be finite and non-negative.')
 
         validated_tolerances[metric_name] = numeric_tolerance
@@ -300,10 +298,11 @@ def _bootstrap_ids_if_present(bootstrap_results: Any) -> Any | None:
     if (
             isinstance(bootstrap_results, Sequence)
             and len(bootstrap_results) > 0
-            and isinstance(bootstrap_results[0], Mapping)
-            and 'bootstrap_id' in bootstrap_results[0]
+            and any(isinstance(replicate, Mapping) and 'bootstrap_id' in replicate
+                    for replicate in bootstrap_results)
     ):
-        if any('bootstrap_id' not in replicate for replicate in bootstrap_results):
+        if any(not isinstance(replicate, Mapping) or 'bootstrap_id' not in replicate
+               for replicate in bootstrap_results):
             raise ValueError(
                 'bootstrap_id must be present for every mapping bootstrap replicate.'
             )
@@ -361,19 +360,12 @@ def _validate_bootstrap_results(
     if bootstrap_ids is None:
         return
 
-    try:
-        ids = np.asarray(bootstrap_ids, dtype=float)
-    except (TypeError, ValueError) as error:
-        raise ValueError('bootstrap_id values must be finite consecutive integers.') from error
-
-    expected_ids = np.arange(1, n_bootstraps + 1)
-
     if (
-            ids.ndim != 1
-            or len(ids) != n_bootstraps
-            or not np.isfinite(ids).all()
-            or not np.equal(ids, np.floor(ids)).all()
-            or not np.array_equal(ids.astype(int), expected_ids)
+            len(bootstrap_ids) != n_bootstraps
+            or any(not isinstance(identifier, (int, np.integer))
+                   or isinstance(identifier, (bool, np.bool_))
+                   or identifier != expected
+                   for expected, identifier in enumerate(bootstrap_ids, start=1))
     ):
         raise ValueError(
             'bootstrap_id values must be the ordered sequence from 1 to n_bootstraps.'
@@ -473,16 +465,10 @@ def _extract_monitored_metrics(
 
         metric_value = metrics[metric_name]
 
-        if isinstance(metric_value, bool):
-            raise TypeError('metrics_fn values must be numeric.')
-
         try:
-            numeric_value = float(metric_value)
-        except (TypeError, ValueError) as error:
-            raise TypeError('metrics_fn values must be numeric.') from error
-
-        if not np.isfinite(numeric_value):
-            raise ValueError('metrics_fn values must be finite.')
+            numeric_value = _validate_finite_number(metric_value, 'metrics_fn values')
+        except (ValueError, OverflowError) as error:
+            raise ValueError('metrics_fn values must be finite.') from error
 
         extracted_metrics[metric_name] = numeric_value
 
@@ -514,7 +500,8 @@ def _summarize_metric_values(
     Raises
     ------
     ValueError
-        If values does not contain at least two finite numeric observations.
+        If values does not contain at least two finite numeric observations,
+        or a diagnostic cannot be represented as a finite float.
 
     Notes
     -----
@@ -530,15 +517,30 @@ def _summarize_metric_values(
     if values_array.ndim != 1 or len(values_array) < 2 or not np.isfinite(values_array).all():
         raise ValueError('metric values must contain at least two finite numeric values.')
 
-    mean = float(np.mean(values_array))
     minimum = float(np.min(values_array))
     maximum = float(np.max(values_array))
     absolute_range = float(maximum - minimum)
+    if not np.isfinite(absolute_range):
+        raise ValueError('metric diagnostics must be representable as finite floats.')
+
+    # Center before scaling: this preserves small differences between large
+    # values while avoiding overflow in sums and squared deviations.
+    center = minimum + absolute_range / 2
+    centered = values_array - center
+    scale = float(np.max(np.abs(centered)))
+    normalized = centered / scale if scale else centered
+    mean = center + float(np.mean(normalized)) * scale
+    std = float(np.std(normalized, ddof=1)) * scale
 
     if abs(mean) > np.finfo(float).eps:
         relative_range = float(absolute_range / abs(mean))
     else:
         relative_range = None
+
+    if not all(np.isfinite(value) for value in (mean, std, absolute_range)) or (
+            relative_range is not None and not np.isfinite(relative_range)
+    ):
+        raise ValueError('metric diagnostics must be representable as finite floats.')
 
     absolute_passed = (
         absolute_range <= absolute_tolerance
@@ -557,7 +559,7 @@ def _summarize_metric_values(
 
     return MonteCarloMetricDiagnostics(
         mean=mean,
-        std=float(np.std(values_array, ddof=1)),
+        std=std,
         minimum=minimum,
         maximum=maximum,
         absolute_range=absolute_range,
@@ -647,6 +649,11 @@ def monte_carlo_error(
     number of bootstrap replications satisfying the configured Monte Carlo
     stability criteria. It is not an "optimal" bootstrap count.
 
+    The range criterion depends on n_runs: adding runs can increase the range
+    at a fixed B. Levels share prefixes, so consecutive passes are a stability
+    diagnostic, not a calibrated probability of convergence. Metrics callbacks
+    must treat their input as read-only to preserve these shared prefixes.
+
     Parameters
     ----------
     bootstrap_fn : Callable[[int, int], Any]
@@ -662,11 +669,12 @@ def monte_carlo_error(
         increasing ordered prefixes until convergence is confirmed or the grid
         is exhausted. Doubling grids are a typical use case.
     absolute_tolerances : Mapping[str, float] | None, default None
-        Per-metric maximum permitted between-run range.
+        Per-metric non-negative finite real scalar maximum between-run range.
     relative_tolerances : Mapping[str, float] | None, default None
-        Per-metric maximum permitted range divided by abs(metric mean). When
-        the mean is at most machine epsilon in magnitude, relative range is
-        undefined and a configured relative criterion fails.
+        Per-metric non-negative finite real scalar maximum range divided by
+        abs(metric mean). When the mean is at most machine epsilon in
+        magnitude, relative range is undefined and a configured relative
+        criterion fails. Strings and booleans are not numeric parameters.
     n_runs : int, default 5
         Number of independent bootstrap random-number streams. At least two
         runs are required to measure between-run dispersion.

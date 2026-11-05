@@ -1,7 +1,19 @@
+from dataclasses import asdict
+from functools import partial
+from itertools import product
+from math import fsum, sqrt
+from statistics import mean, stdev
+
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
+from alpha_research.resampling.block_bootstrap import (
+    bootstrap_metrics,
+    generate_moving_blocks,
+    moving_block_bootstrap,
+)
 from alpha_research.resampling.convergence import (
     _bootstrap_ids_if_present,
     _extract_monitored_metrics,
@@ -719,3 +731,349 @@ def test_prefix_consistent_bootstrap_preserves_prefix_and_bootstrap_identifiers(
     assert [replicate['bootstrap_id'] for replicate in small] == list(range(1, 2001))
     assert large[1749] == small[1749]
     assert [replicate['bootstrap_id'] for replicate in large] == list(range(1, 10001))
+
+
+# ------------------------------------------------------
+# Scalar, identity, and numerical boundary contracts
+# ------------------------------------------------------
+@pytest.mark.parametrize('value', ['0.1', np.bool_(True), np.bool_(False), 1j,
+                                   [0.1], np.array([0.1]), np.array(0.1)])
+def test_convergence_rejects_non_real_scalar_tolerances_and_metrics(value):
+    """Should reject coercible strings, booleans, complex values, and nonscalars."""
+    with pytest.raises(TypeError, match='must be numeric'):
+        _validate_tolerances({'metric': value}, 'absolute_tolerances')
+    with pytest.raises(TypeError, match='must be numeric'):
+        _extract_monitored_metrics(lambda _: {'metric': value}, [], ('metric',))
+
+
+@pytest.mark.parametrize('value', [np.float32(.5), np.float64(.5), np.int32(1), np.int64(1)])
+def test_convergence_accepts_numpy_real_scalars(value):
+    """Should preserve valid NumPy real scalar metrics and tolerances."""
+    assert _validate_tolerances({'metric': value}, 'tolerances') == {'metric': float(value)}
+    assert _extract_monitored_metrics(lambda _: {'metric': value}, [], ('metric',)) == {'metric': float(value)}
+
+
+def test_convergence_rejects_unrepresentable_integer_scalars():
+    """Should report unrepresentable integers as invalid finite values without leaking overflow."""
+    with pytest.raises(ValueError, match='finite'):
+        _validate_tolerances({'metric': 10 ** 400}, 'tolerances')
+    with pytest.raises(ValueError, match='finite'):
+        _extract_monitored_metrics(lambda _: {'metric': 10 ** 400}, [], ('metric',))
+
+
+@pytest.mark.parametrize('results', [
+    [{'value': .1}, {'bootstrap_id': 2}],
+    [0., {'bootstrap_id': 2}],
+    [{'bootstrap_id': 1}, 0.],
+    [{'value': .1}, {'value': .2}, {'bootstrap_id': 3}],
+])
+def test_bootstrap_ids_rejects_partial_presence_at_any_position(results):
+    """Should reject partial or heterogeneous identities even when the first row has no ID."""
+    with pytest.raises(ValueError, match='every mapping bootstrap replicate'):
+        _bootstrap_ids_if_present(results)
+    with pytest.raises(ValueError, match='every mapping bootstrap replicate'):
+        _validate_bootstrap_results(results, len(results))
+
+
+@pytest.mark.parametrize('identifier', [True, np.bool_(True), '1', 1., None, np.nan,
+                                        np.inf, 1j, [1], 10 ** 400])
+def test_bootstrap_results_requires_actual_integer_identities(identifier):
+    """Should reject noninteger, boolean, missing, and out-of-order IDs without coercion."""
+    with pytest.raises(ValueError, match='ordered sequence'):
+        _validate_bootstrap_results([{'bootstrap_id': identifier}, {'bootstrap_id': 2}], 2)
+
+
+@pytest.mark.parametrize('factory', [pd.DataFrame, pl.DataFrame])
+def test_bootstrap_results_validates_dataframe_id_types(factory):
+    """Should enforce integer IDs in both dataframe backends and accept NumPy integers."""
+    _validate_bootstrap_results(factory({'bootstrap_id': [np.int64(1), np.int64(2)]}), 2)
+    for ids in [[1., 2.], ['1', '2'], [None, None], [True, False]]:
+        with pytest.raises(ValueError, match='ordered sequence'):
+            _validate_bootstrap_results(factory({'bootstrap_id': ids}), 2)
+
+
+@pytest.mark.parametrize('relative', [False, True])
+@pytest.mark.parametrize('direction, passed', [(-1, False), (0, True), (1, True)])
+def test_metric_tolerance_uses_inclusive_float_boundary(relative, direction, passed):
+    """Should distinguish equality from adjacent floating-point tolerances for both criteria."""
+    boundary = 1. if relative else 2.
+    tolerance = boundary if direction == 0 else np.nextafter(boundary, -np.inf if direction < 0 else np.inf)
+    result = _summarize_metric_values([1., 3.], None if relative else tolerance,
+                                     tolerance if relative else None)
+    assert result.passed is passed
+
+
+@pytest.mark.parametrize('reference', [0., np.finfo(float).eps,
+                                       np.nextafter(np.finfo(float).eps, np.inf)])
+@pytest.mark.parametrize('sign', [-1, 1])
+def test_relative_metric_denominator_boundary(reference, sign):
+    """Should use the absolute mean and exclude equality at the machine-epsilon cutoff."""
+    result = _summarize_metric_values([sign * reference] * 2, None, 0.)
+    defined = bool(reference > np.finfo(float).eps)
+    assert result.relative_range == (0. if defined else None)
+    assert result.passed is defined
+
+
+@pytest.mark.parametrize('values, expected_mean, expected_std, expected_range', [
+    ([1e308, 1e308], 1e308, 0., 0.),
+    ([1e200, 2e200], 1.5e200, 1e200 / sqrt(2), 1e200),
+    ([-1e200, 1e200], 0., sqrt(2) * 1e200, 2e200),
+    ([0., 0.], 0., 0., 0.),
+])
+def test_metric_summary_avoids_intermediate_overflow(values, expected_mean, expected_std, expected_range):
+    """Should preserve analytically known finite diagnostics without overflow warnings."""
+    with np.errstate(over='raise', invalid='raise'):
+        result = _summarize_metric_values(values, expected_range, None)
+    assert result.mean == pytest.approx(expected_mean)
+    assert result.std == pytest.approx(expected_std)
+    assert result.absolute_range == pytest.approx(expected_range)
+    assert result.passed
+
+
+@pytest.mark.parametrize('values', [[-1e308, 1e308], [-1e308, 1e308, 1.],
+                                    [-5e307, 5e307, 1e-9]])
+def test_metric_summary_rejects_unrepresentable_diagnostics(values):
+    """Should reject an overflowing range or deviation instead of approving invalid diagnostics."""
+    with pytest.raises(ValueError, match='representable as finite'):
+        _summarize_metric_values(values, 1., None)
+
+
+def test_convergence_preserves_finite_large_constant_diagnostics():
+    """Should converge with finite mean and zero spread for a representable huge constant."""
+    result = monte_carlo_error(lambda n_bootstraps, random_state: [1e308] * n_bootstraps,
+                              lambda values: {'metric': values[0]}, [2, 4],
+                              {'metric': 0.}, {'metric': 0.}, n_runs=2, random_state=42)
+    assert result.converged
+    for level in result.diagnostics:
+        assert level.metrics['metric'].mean == 1e308
+        assert level.metrics['metric'].std == 0.
+
+
+def test_metric_summary_preserves_small_differences_between_large_values():
+    """Should preserve a one-ULP difference instead of losing precision while scaling large values."""
+    first = 1e308
+    second = float(np.nextafter(first, np.inf))
+    difference = second - first
+    with np.errstate(over='raise', invalid='raise'):
+        result = _summarize_metric_values([first, second], difference, None)
+    assert result.std == pytest.approx(difference / sqrt(2), rel=1e-14)
+    assert result.absolute_range == difference
+    assert result.passed
+
+
+# ------------------------------------------------------
+# Real bootstrap integration and independent Monte Carlo references
+# ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas_series', 'pandas_frame', 'polars_series', 'polars_frame'])
+@pytest.mark.parametrize('sample_size', [3, 4])
+@pytest.mark.parametrize('continuity', [None, [0, 1, 4, 5]])
+def test_convergence_integrates_real_mbb_and_metrics(backend, sample_size, continuity):
+    """Should validate real MBB prefixes and all metric diagnostics against scalar reference calculations."""
+    # This backend matrix can also be applied to additional bootstrap samplers.
+    values = [0., 1., 4., 9.]
+    source = (pd.Series(values) if backend == 'pandas_series' else
+              pd.DataFrame({'value': values}) if backend == 'pandas_frame' else
+              pl.Series('value', values) if backend == 'polars_series' else
+              pl.DataFrame({'value': values}))
+    blocks = generate_moving_blocks(source, block_length=2, continuity=continuity)
+    bootstrap = partial(moving_block_bootstrap, blocks=blocks, sample_size=sample_size)
+    estimates_by_call = []
+
+    def metrics(samples):
+        """Should summarize real samples while recording estimates for an independent oracle.
+
+        Parameters
+        ----------
+        samples : list
+            Real bootstrap samples in their original backend.
+
+        Returns
+        -------
+        dict
+            Production bootstrap metrics.
+
+        Raises
+        ------
+        ValueError
+            If bootstrap metrics cannot summarize the estimates.
+        """
+        estimates = [fsum(sample['value'].to_list() if 'frame' in backend else sample.to_list())
+                     / sample_size for sample in samples]
+        estimates_by_call.append(estimates)
+        return asdict(bootstrap_metrics(estimates, confidence_level=.5))
+
+    names = ['mean', 'std', 'ci_lower', 'ci_upper', 'pct_positive']
+    result = monte_carlo_error(bootstrap, metrics, [8, 16, 32],
+                              {name: 100. for name in names}, n_runs=3,
+                              random_state=42, return_bootstrap_results=True)
+    assert result.converged and result.recommended_n_bootstraps == 8
+    assert [level.n_bootstraps for level in result.diagnostics] == [8, 16]
+    # Explicitly enumerate possible block pairs, including truncation of the last block.
+    candidates = [[0., 1.], [1., 4.], [4., 9.]] if continuity is None else [[0., 1.], [4., 9.]]
+    support = {fsum((a + b)[:sample_size]) / sample_size for a, b in product(candidates, repeat=2)}
+    for level_index, level in enumerate(result.diagnostics):
+        references = []
+        for estimates in estimates_by_call[level_index * 3:(level_index + 1) * 3]:
+            assert set(estimates) <= support
+            ordered = sorted(estimates)
+            # Linear percentile interpolation, calculated without NumPy/production quantiles.
+            bounds = []
+            for probability in [.25, .75]:
+                position = (len(ordered) - 1) * probability
+                lower = int(position)
+                weight = position - lower
+                bounds.append(ordered[lower] * (1 - weight) + ordered[lower + 1] * weight)
+            references.append({'mean': mean(estimates), 'std': stdev(estimates),
+                               'ci_lower': bounds[0], 'ci_upper': bounds[1],
+                               'pct_positive': sum(value > 0 for value in estimates) / len(estimates)})
+        for name in names:
+            expected = [row[name] for row in references]
+            diagnostic = level.metrics[name]
+            assert diagnostic.mean == pytest.approx(mean(expected))
+            assert diagnostic.std == pytest.approx(stdev(expected))
+            assert diagnostic.minimum == pytest.approx(min(expected))
+            assert diagnostic.maximum == pytest.approx(max(expected))
+            assert diagnostic.absolute_range == pytest.approx(max(expected) - min(expected))
+        assert level.all_metrics_passed
+    short = bootstrap(n_bootstraps=8, random_state=result.run_random_states[0])
+    long = bootstrap(n_bootstraps=32, random_state=result.run_random_states[0])
+    for retained, small, large in zip(result.reference_bootstrap_results, short, long[:8]):
+        assert type(retained) is type(source)
+        assert retained.equals(small) and small.equals(large)
+    assert (source['value'].to_list() if 'frame' in backend else source.to_list()) == values
+
+
+def test_real_mbb_monte_carlo_mean_has_inverse_root_b_scaling():
+    """Should match the enumerated bootstrap mean variance and its inverse-root-B Monte Carlo scaling."""
+    # Block means are 1/2, 5/2, 13/2. Two independent draws give
+    # E[replicate mean] = 19/6 and Var[replicate mean] = 28/9.
+    bootstrap = partial(moving_block_bootstrap,
+                        blocks=generate_moving_blocks(pd.Series([0., 1., 4., 9.]), 2), sample_size=4)
+    result = monte_carlo_error(bootstrap,
+                              lambda samples: {'mean': bootstrap_metrics([sample.mean() for sample in samples]).mean},
+                              [16, 256], {'mean': 0.}, n_runs=192, random_state=29)
+    assert not result.converged
+    for level in result.diagnostics:
+        diagnostic = level.metrics['mean']
+        expected_sd = sqrt(28 / (9 * level.n_bootstraps))
+        # With 192 independent bounded runs, these deliberately broad bounds
+        # characterize dispersion without demanding monotonicity for every seed.
+        assert .7 * expected_sd < diagnostic.std < 1.3 * expected_sd
+        assert abs(diagnostic.mean - 19 / 6) < 5 * expected_sd / sqrt(192)
+    ratio = result.diagnostics[0].metrics['mean'].std / result.diagnostics[1].metrics['mean'].std
+    assert 2.5 < ratio < 5.5
+
+
+@pytest.mark.parametrize('relative', [False, True])
+def test_real_mbb_zero_variance_respects_relative_zero_mean_policy(relative):
+    """Should accept deterministic zero spread absolutely while leaving its relative criterion undefined."""
+    bootstrap = partial(moving_block_bootstrap,
+                        blocks=generate_moving_blocks(pd.Series([1., 1., 1.]), 2), sample_size=3)
+    result = monte_carlo_error(bootstrap,
+                              lambda samples: {'std': bootstrap_metrics([sample.mean() for sample in samples]).std},
+                              [2, 4], absolute_tolerances=None if relative else {'std': 0.},
+                              relative_tolerances={'std': 0.} if relative else None,
+                              n_runs=2, random_state=42)
+    assert result.converged is (not relative)
+    for level in result.diagnostics:
+        assert level.metrics['std'].mean == 0.
+        assert level.metrics['std'].std == 0.
+        assert level.metrics['std'].relative_range is None
+
+
+def test_more_runs_can_increase_range_and_reverse_convergence():
+    """Should retain existing streams while exposing range sensitivity to an additional run."""
+    seeds = _generate_run_random_states(42, 3)
+    bootstrap = lambda n_bootstraps, random_state: [float(seeds.index(random_state))] * n_bootstraps
+    kwargs = {'bootstrap_fn': bootstrap, 'metrics_fn': lambda values: {'metric': values[0]},
+              'n_bootstraps_grid': [2, 4], 'absolute_tolerances': {'metric': 1.}, 'random_state': 42}
+    fewer = monte_carlo_error(**kwargs, n_runs=2)
+    more = monte_carlo_error(**kwargs, n_runs=3)
+    assert fewer.run_random_states == more.run_random_states[:2]
+    assert fewer.converged and not more.converged
+    for first, second in zip(fewer.diagnostics, more.diagnostics):
+        assert first.metrics['metric'].absolute_range == 1.
+        assert second.metrics['metric'].absolute_range == 2.
+
+
+@pytest.mark.parametrize('container', ['list', 'tuple', 'numpy', 'pandas_series',
+                                      'pandas_frame', 'polars_series', 'polars_frame'])
+def test_convergence_preserves_supported_result_containers(container):
+    """Should evaluate row prefixes and retain the original container without mutating generated results."""
+    generated = []
+
+    def bootstrap(n_bootstraps, random_state):
+        """Should construct a deterministic container with nondefault Pandas indexes.
+
+        Parameters
+        ----------
+        n_bootstraps, random_state : int
+            Requested size and unused deterministic run seed.
+
+        Returns
+        -------
+        object
+            Sized ordered replicate collection.
+
+        Raises
+        ------
+        ValueError
+            If a dataframe cannot be constructed.
+        """
+        values = list(range(n_bootstraps))
+        result = (values if container == 'list' else tuple(values) if container == 'tuple' else
+                  np.array(values) if container == 'numpy' else
+                  pd.Series(values, index=range(10, 10 + n_bootstraps)) if container == 'pandas_series' else
+                  pd.DataFrame({'value': values}, index=range(10, 10 + n_bootstraps)) if container == 'pandas_frame' else
+                  pl.Series('value', values) if container == 'polars_series' else pl.DataFrame({'value': values}))
+        generated.append(result)
+        return result
+
+    metrics = lambda values: {'mean': mean(float(value) for value in
+                                          (values['value'] if 'frame' in container else values))}
+    result = monte_carlo_error(bootstrap, metrics, [2, 4, 8], {'mean': 0.}, n_runs=2,
+                              random_state=42, return_bootstrap_results=True)
+    assert result.converged and result.recommended_n_bootstraps == 2
+    assert type(result.reference_bootstrap_results) is type(generated[0])
+    retained = result.reference_bootstrap_results
+    if container.startswith('pandas'):
+        assert retained.index.equals(generated[0].index[:2])
+        if container == 'pandas_frame':
+            assert retained.columns.equals(generated[0].columns)
+            assert retained.dtypes.equals(generated[0].dtypes)
+        else:
+            assert retained.dtype == generated[0].dtype
+    elif container == 'polars_frame':
+        assert retained.schema == generated[0].schema
+    elif container in {'polars_series', 'numpy'}:
+        assert retained.dtype == generated[0].dtype
+    assert [level.metrics['mean'].mean for level in result.diagnostics] == [.5, 1.5]
+    assert list(result.reference_bootstrap_results['value'] if 'frame' in container else result.reference_bootstrap_results) == [0, 1]
+    for original in generated:
+        assert list(original['value'] if 'frame' in container else original) == list(range(8))
+
+
+def test_single_passing_level_cannot_confirm_convergence():
+    """Should retain one passing diagnostic without recommending B or returning reference results."""
+    result = monte_carlo_error(lambda n_bootstraps, random_state: [1.] * n_bootstraps,
+                              lambda _: {'metric': 1.}, [2], {'metric': 0.}, n_runs=2,
+                              random_state=42, return_bootstrap_results=True)
+    assert result.diagnostics[0].all_metrics_passed
+    assert not result.diagnostics[0].convergence_confirmed
+    assert not result.converged
+    assert result.recommended_n_bootstraps is None
+    assert result.reference_bootstrap_results is None and result.reference_run_id is None
+
+
+@pytest.mark.parametrize('stage', ['bootstrap', 'metrics'])
+def test_convergence_propagates_user_callable_failures(stage):
+    """Should propagate the original bootstrap or metrics exception without retries or later calls."""
+    exception = RuntimeError('user calculation failed')
+    calls = []
+    bootstrap = lambda n_bootstraps, random_state: calls.append('bootstrap') or (
+        (_ for _ in ()).throw(exception) if stage == 'bootstrap' else [1.] * n_bootstraps)
+    metrics = lambda _: calls.append('metrics') or (_ for _ in ()).throw(exception)
+    with pytest.raises(RuntimeError) as caught:
+        monte_carlo_error(bootstrap, metrics, [2, 4], {'metric': 0.}, n_runs=2, random_state=42)
+    assert caught.value is exception
+    assert calls == (['bootstrap'] if stage == 'bootstrap' else ['bootstrap', 'bootstrap', 'metrics'])
