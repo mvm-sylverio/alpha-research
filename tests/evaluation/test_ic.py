@@ -1937,3 +1937,25 @@ def test_partial_ic_summary_table_validates_feature_roles(
             target='target',
             covariates=covariates,
         )
+
+
+@pytest.mark.parametrize('backend', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('confounded', [False, True])
+def test_partial_ic_inherits_scale_safe_residuals_and_undefined_dates(backend, confounded):
+    """Should preserve analytically known tiny signals and omit perfectly confounded cross-sections."""
+    z = np.array([1, 1, 1, 1, -1, -1, -1, -1], dtype=float)
+    u = np.array([1, 1, -1, -1, 1, 1, -1, -1], dtype=float)
+    v = np.array([1, -1, 1, -1, 1, -1, 1, -1], dtype=float)
+    frame = backend({'time': [1] * 8, 'symbol': [str(i) for i in range(8)],
+                     'feature': z * 1e15 if confounded else (z + u) * 1e-15,
+                     'target': z + u + v, 'z': z})
+    result = partial_information_coefficient(frame, 'feature', 'target', 'z',
+                                            corr_method='pearson', symbol_column='symbol')
+    assert list(result.columns) == ['time', 'partial_ic']
+    if confounded:
+        assert len(result) == 0
+    else:
+        assert result['partial_ic'].to_list() == pytest.approx([2 ** -.5])
+    assert result['partial_ic'].dtype == (np.dtype('float64') if backend is pd.DataFrame else pl.Float64)
+    with pytest.raises(ValueError, match='distinct'):
+        partial_information_coefficient(frame, 'feature', 'feature', 'z')

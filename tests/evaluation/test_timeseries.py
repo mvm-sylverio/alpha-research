@@ -3286,3 +3286,22 @@ def test_partial_temporal_summary_validates_inference_configuration(
             partial_temporal_data_pandas,
             **arguments,
         )
+
+
+@pytest.mark.parametrize('backend', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('confounded', [False, True])
+def test_partial_temporal_inherits_scale_safe_and_undefined_residuals(backend, confounded):
+    """Should preserve the residual estimand and undefined confounding through the temporal API."""
+    z = np.array([1, 1, 1, 1, -1, -1, -1, -1], dtype=float)
+    u = np.array([1, 1, -1, -1, 1, 1, -1, -1], dtype=float)
+    v = np.array([1, -1, 1, -1, 1, -1, 1, -1], dtype=float)
+    frame = backend({'time': list(range(8)), 'symbol': ['A'] * 8,
+                     'feature': z * 1e15 if confounded else (z + u) * 1e-15,
+                     'target': z + u + v, 'z': z})
+    result = partial_temporal_association(frame, 'feature', 'target', 'z', corr_method='pearson')
+    if confounded:
+        assert np.isnan(result)
+    else:
+        assert result == pytest.approx(2 ** -.5)
+    with pytest.raises(ValueError, match='distinct'):
+        partial_temporal_association(frame, 'feature', 'feature', 'z')
