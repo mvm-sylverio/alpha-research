@@ -1,13 +1,17 @@
+from math import sqrt
+
 import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
 
 from alpha_research.resampling.block_bootstrap import (
+    BootstrapMetricsResults,
+    _bootstrap_distribution_summary,
+    _bootstrap_numeric_values,
     _concatenate_blocks,
     _validate_blocks,
     _validate_resampling_data,
-    BootstrapMetricsResults,
     bootstrap_metrics,
     generate_moving_blocks,
     moving_block_bootstrap,
@@ -536,3 +540,304 @@ def test_bootstrap_metrics_rejects_unsupported_values_type():
     """Should reject objects that are not supported bootstrap value containers."""
     with pytest.raises(TypeError, match='one-dimensional sequence'):
         bootstrap_metrics({'estimate': [1.0, 2.0]})
+
+
+
+# ------------------------------------------------------
+# Schema and resampling boundary contracts
+# ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('change', ['names', 'order', 'dtype'])
+def test_mbb_rejects_incompatible_schemas_before_rng(backend, change, monkeypatch):
+    """Should reject every incompatible candidate before drawing any random block."""
+    factory = pd.DataFrame if backend == 'pandas' else pl.DataFrame
+    first = factory({'a': [1, 2], 'b': [3, 4]})
+    second = (factory({'c': [1, 2], 'b': [3, 4]}) if change == 'names' else
+              factory({'b': [3, 4], 'a': [1, 2]}) if change == 'order' else
+              factory({'a': [1., 2.], 'b': [3, 4]}))
+    monkeypatch.setattr('alpha_research.resampling.block_bootstrap.np.random.default_rng',
+                        lambda _: pytest.fail('Invalid schemas must fail before creating the RNG.'))
+    with pytest.raises(ValueError, match='identical names'):
+        _validate_blocks([first, second])
+    with pytest.raises(ValueError, match='identical names'):
+        moving_block_bootstrap([first, second], 4, 1, 42)
+
+
+def test_blocks_rejects_duplicate_pandas_columns():
+    """Should reject ambiguous dataframe schemas even with only one candidate."""
+    with pytest.raises(ValueError, match='unique column names'):
+        _validate_blocks([pd.DataFrame([[1, 2]], columns=['value', 'value'])])
+
+
+@pytest.mark.parametrize('factory', [pd.Series, pl.Series])
+@pytest.mark.parametrize('change', ['name', 'dtype'])
+def test_blocks_requires_identical_series_names_and_dtypes(factory, change):
+    """Should prevent silently changing a Series identity or dtype between selected blocks."""
+    if factory is pd.Series:
+        first = factory([1, 2], name='value')
+        second = factory([3, 4], name='other') if change == 'name' else factory([3., 4.], name='value')
+    else:
+        first = factory('value', [1, 2])
+        second = factory('other', [3, 4]) if change == 'name' else factory('value', [3., 4.])
+    with pytest.raises(ValueError, match='identical names'):
+        _validate_blocks([first, second])
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+@pytest.mark.parametrize('sample_size', [1, 3, 4, 11])
+def test_full_history_block_repeats_without_resampling_variation(backend, sample_size):
+    """Should expose the full-history block's deterministic boundary for shorter and longer samples."""
+    source = pd.Series([1, 2, 3], index=[10, 30, 90], name='value') if backend == 'pandas' else pl.Series('value', [1, 2, 3])
+    samples = moving_block_bootstrap(generate_moving_blocks(source, 3), sample_size, 4, 42)
+    expected = ([1, 2, 3] * 4)[:sample_size]
+    assert all(sample.to_list() == expected for sample in samples)
+    if backend == 'pandas':
+        assert all(sample.index.to_list() == list(range(sample_size)) for sample in samples)
+        assert source.index.to_list() == [10, 30, 90]
+
+
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_resamples_preserve_missing_rows_schema_and_duplicate_timestamps(backend):
+    """Should repeat complete paired rows and timestamps without applying causal-key validation to resamples."""
+    frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=3, tz='UTC'),
+                          'feature': [1., np.nan, 3.], 'target': [10., 20., np.inf]})
+    if backend == 'polars':
+        frame = pl.from_pandas(frame, nan_to_null=False)
+    original = frame.copy(deep=True) if backend == 'pandas' else frame.clone()
+    samples = moving_block_bootstrap(generate_moving_blocks(frame, 3), 7, 2, 42)
+    for sample in samples:
+        assert sample['time'].to_list() == frame['time'].to_list() * 2 + frame['time'].to_list()[:1]
+        np.testing.assert_equal(sample['feature'].to_numpy(), [1., np.nan, 3., 1., np.nan, 3., 1.])
+        np.testing.assert_equal(sample['target'].to_numpy(), [10., 20., np.inf, 10., 20., np.inf, 10.])
+        if backend == 'pandas':
+            assert sample.dtypes.equals(frame.dtypes)
+        else:
+            assert sample.schema == frame.schema
+    assert frame.equals(original)
+
+
+def test_moving_blocks_preserves_the_non_circular_endpoint_weights():
+    """Should document MBB endpoint underrepresentation rather than changing the sampling method."""
+    blocks = generate_moving_blocks(pd.Series(range(5)), 3)
+    assert [block.to_list() for block in blocks] == [[0, 1, 2], [1, 2, 3], [2, 3, 4]]
+    assert [sum(value in block.to_list() for block in blocks) for value in range(5)] == [1, 2, 3, 2, 1]
+
+
+@pytest.mark.parametrize('factory', [pd.Series, pl.Series])
+def test_mbb_block_one_and_nondivisible_samples_preserve_seed_prefixes(factory):
+    """Should preserve seeded replicate prefixes and backend parity without promising cross-version RNG stability."""
+    source = factory([1, 2, 3, 4])
+    for length in [1, 2, 3]:
+        blocks = generate_moving_blocks(source, length)
+        short = moving_block_bootstrap(blocks, 11, 3, 73)
+        long = moving_block_bootstrap(blocks, 11, 9, 73)
+        other = moving_block_bootstrap(generate_moving_blocks(
+            pl.Series([1, 2, 3, 4]) if factory is pd.Series else pd.Series([1, 2, 3, 4]), length), 11, 3, 73)
+        assert [sample.to_list() for sample in short] == [sample.to_list() for sample in long[:3]]
+        assert [sample.to_list() for sample in short] == [sample.to_list() for sample in other]
+        for sample in short:
+            assert len(sample) == 11
+            for start in range(0, 11, length):
+                piece = sample.to_list()[start:start + length]
+                assert piece in [block.to_list()[:len(piece)] for block in blocks]
+
+
+# ------------------------------------------------------
+# Strict real estimates, missingness parity, and independent numeric references
+# ------------------------------------------------------
+@pytest.mark.parametrize('values', [True, '1', 1j, np.datetime64('2024-01-01'), np.timedelta64(1, 'D')])
+@pytest.mark.parametrize('container', ['list', 'tuple', 'numpy', 'pandas', 'polars'])
+def test_bootstrap_metrics_rejects_invalid_estimate_types(values, container):
+    """Should reject invalid values without coercion, imaginary-part loss, or silent row deletion."""
+    entries = [values, values]
+    data = (entries if container == 'list' else tuple(entries) if container == 'tuple' else
+            np.array(entries) if container == 'numpy' else pd.Series(entries) if container == 'pandas' else
+            pl.Series('value', entries, dtype=pl.Object))
+    with pytest.raises(TypeError, match='numeric estimates'):
+        _bootstrap_numeric_values(data)
+    with pytest.raises(TypeError, match='numeric estimates'):
+        bootstrap_metrics(data)
+
+
+@pytest.mark.parametrize('container', ['list', 'tuple', 'numpy', 'pandas', 'polars'])
+def test_bootstrap_numeric_values_has_missing_and_infinite_parity(container):
+    """Should retain the same finite estimates across native missing values and all supported containers."""
+    entries = [1., None, np.nan, np.inf, -np.inf, 3.]
+    if container != 'polars':
+        entries.insert(2, pd.NA)
+    data = (entries if container == 'list' else tuple(entries) if container == 'tuple' else
+            np.array(entries, dtype=object) if container == 'numpy' else
+            pd.Series(entries, dtype='Float64') if container == 'pandas' else pl.Series(entries))
+    np.testing.assert_array_equal(_bootstrap_numeric_values(data), [1., 3.])
+    summary = bootstrap_metrics(data, confidence_level=.5)
+    assert summary.mean == 2. and summary.std == pytest.approx(sqrt(2))
+    assert (summary.ci_lower, summary.ci_upper) == (1.5, 2.5)
+    assert summary.n_bootstraps == 2 and summary.pct_positive == 1.
+
+
+@pytest.mark.parametrize('values', [[], [None, pd.NA, np.nan, np.inf], np.array([np.nan])])
+def test_bootstrap_numeric_values_rejects_empty_effective_samples(values):
+    """Should reject empty effective distributions rather than fabricate a summary."""
+    with pytest.raises(ValueError, match='at least one finite'):
+        _bootstrap_numeric_values(values)
+
+
+def test_bootstrap_numeric_values_validates_container_dimensions_and_range():
+    """Should reject unsupported containers, nested arrays, and finite integers outside Float64 range."""
+    with pytest.raises(TypeError, match='one-dimensional sequence'):
+        _bootstrap_numeric_values({'value': [1.]})
+    with pytest.raises(ValueError, match='one-dimensional'):
+        _bootstrap_numeric_values(np.ones((2, 2)))
+    with pytest.raises(ValueError, match='representable'):
+        _bootstrap_numeric_values([10 ** 400])
+
+
+@pytest.mark.parametrize('values, expected_mean, expected_std, lower, upper', [
+    ([1e308, 1e308], 1e308, 0., 1e308, 1e308),
+    ([-1e308, 1e308], 0., sqrt(2) * 1e308, -.5e308, .5e308),
+    ([1e200, 2e200], 1.5e200, 1e200 / sqrt(2), 1.25e200, 1.75e200),
+    ([0., 0.], 0., 0., 0., 0.),
+])
+def test_bootstrap_summary_avoids_overflow_with_hand_calculated_statistics(values, expected_mean, expected_std, lower, upper):
+    """Should preserve analytically known moments and linear percentiles for extreme finite estimates."""
+    with np.errstate(over='raise', invalid='raise'):
+        result = _bootstrap_distribution_summary(np.array(values), .25, .75)
+        public = bootstrap_metrics(values, confidence_level=.5)
+    assert result == pytest.approx((expected_mean, expected_std, lower, upper))
+    assert (public.mean, public.std, public.ci_lower, public.ci_upper) == pytest.approx(result)
+    assert public.ci_lower <= public.ci_upper
+
+
+@pytest.mark.parametrize('values', [[1.], [0.], [None, 3., np.inf]])
+def test_bootstrap_metrics_singleton_keeps_undefined_sample_deviation(values):
+    """Should return a point interval and NaN deviation when exactly one finite estimate remains."""
+    result = bootstrap_metrics(values)
+    expected = next(value for value in values if value is not None and np.isfinite(value))
+    assert result.mean == result.ci_lower == result.ci_upper == expected
+    assert np.isnan(result.std) and result.n_bootstraps == 1
+
+
+@pytest.mark.parametrize('values, lower, upper', [
+    (np.array([]), .1, .9), (np.ones((2, 2)), .1, .9),
+    (np.array([1., np.nan]), .1, .9), (np.array([1.]), -.1, .9),
+    (np.array([1.]), .9, .1), (np.array([1.]), .1, 1.1),
+    (np.array([1.]), None, .9), (np.array([1.]), True, .9),
+])
+def test_bootstrap_distribution_summary_validates_inputs(values, lower, upper):
+    """Should reject invalid arrays and percentile probabilities directly."""
+    with pytest.raises(ValueError, match='finite estimates and ordered'):
+        _bootstrap_distribution_summary(values, lower, upper)
+
+
+@pytest.mark.parametrize('values', [[1.], np.array(['1']), np.array([1j])])
+def test_bootstrap_distribution_summary_rejects_non_real_arrays(values):
+    """Should reject nonnumeric or unsupported array types before arithmetic."""
+    with pytest.raises(TypeError, match='real numeric NumPy array'):
+        _bootstrap_distribution_summary(values, .1, .9)
+
+
+def test_bootstrap_metrics_rejects_unrepresentable_deviation():
+    """Should raise explicitly when the actual sample deviation exceeds the float range."""
+    with pytest.raises(ValueError, match='representable'):
+        bootstrap_metrics([-1.7e308, 1.7e308])
+
+
+@pytest.mark.parametrize('values', [pd.Series(['1', 'bad', '3']), pl.Series(['1', 'bad', '3']),
+                                   np.array(['2024-01-01'], dtype='datetime64[ns]')])
+def test_bootstrap_metrics_never_drops_bad_strings_or_converts_temporal_storage(values):
+    """Should reject native nonnumeric containers instead of silently shortening the distribution."""
+    with pytest.raises(TypeError, match='numeric estimates'):
+        bootstrap_metrics(values)
+
+
+def test_bootstrap_metrics_preserves_one_ulp_difference_at_large_magnitudes():
+    """Should retain an analytically known deviation between adjacent representable extreme values."""
+    first = 1e308
+    last = float(np.nextafter(first, np.inf))
+    result = bootstrap_metrics([first, last])
+    assert result.std == pytest.approx((last - first) / sqrt(2), rel=1e-14)
+    assert first <= result.ci_lower <= result.ci_upper <= last
+
+
+def test_bootstrap_percentiles_preserve_small_neighbors_beside_an_extreme_outlier():
+    """Should interpolate small order statistics without losing them to global rescaling."""
+    result = _bootstrap_distribution_summary(np.array([1., 2., 1e308]), .25, .75)
+    assert result[2] == 1.5
+    assert result[3] == pytest.approx(5e307)
+
+
+@pytest.mark.parametrize('confidence', [True, np.bool_(True), None, '.95', 1j, np.nan, np.inf])
+def test_bootstrap_metrics_rejects_invalid_confidence_types_and_nonfinite_levels(confidence):
+    """Should reject invalid confidence parameters consistently before normalizing estimates."""
+    with pytest.raises(ValueError, match='confidence_level'):
+        bootstrap_metrics([1., 2.], confidence_level=confidence)
+
+
+# ------------------------------------------------------
+# Bounded statistical properties of the existing non-circular MBB
+# ------------------------------------------------------
+@pytest.mark.parametrize('sample_size', [1, 2, 3, 11, 40])
+def test_mbb_sample_size_has_exact_conditional_mean_and_variance(sample_size):
+    """Should match independent moments of whole and truncated draws for arbitrary resample sizes."""
+    # Candidate blocks [0,1] and [2,3] have sums 1/5 (mean 3,
+    # variance 4). An odd final observation is 0/2 (mean 1, variance 1).
+    # Blocks are drawn independently, so variances add before dividing by m**2.
+    whole, tail = divmod(sample_size, 2)
+    expected_mean = (3 * whole + tail) / sample_size
+    expected_variance = (4 * whole + tail) / sample_size ** 2
+    samples = moving_block_bootstrap(generate_moving_blocks(pd.Series([0., 1., 2., 3.]), 2, step=2),
+                                     sample_size, 1024, 195)
+    estimates = [sum(sample) / sample_size for sample in samples]
+    average = sum(estimates) / len(estimates)
+    variance = sum((value - average) ** 2 for value in estimates) / (len(estimates) - 1)
+    assert abs(average - expected_mean) < 5 * sqrt(expected_variance / len(estimates))
+    assert .8 * expected_variance < variance < 1.2 * expected_variance
+
+
+def test_mbb_preserves_more_ar1_dependence_than_independent_resampling():
+    """Should retain substantially more lag-one dependence than an independently sampled IID reference."""
+    rng = np.random.default_rng(719)
+    values = np.empty(400)
+    values[0] = rng.normal() / sqrt(1 - .8 ** 2)
+    for index in range(1, len(values)):
+        values[index] = .8 * values[index - 1] + rng.normal()
+    mbb = moving_block_bootstrap(generate_moving_blocks(pd.Series(values), 16), len(values), 160, 42)
+    iid = np.random.default_rng(99).choice(values, size=(160, len(values)), replace=True)
+    mbb_lag = sum(np.corrcoef(sample.to_numpy()[:-1], sample.to_numpy()[1:])[0, 1] for sample in mbb) / len(mbb)
+    iid_lag = sum(np.corrcoef(sample[:-1], sample[1:])[0, 1] for sample in iid) / len(iid)
+    assert abs(iid_lag) < .1
+    assert .55 < mbb_lag < .9
+    assert mbb_lag - iid_lag > .5
+
+
+def test_mbb_mean_uncertainty_and_percentile_coverage_across_block_lengths():
+    """Should characterize finite-sample MBB uncertainty against exact stationary AR(1) mean variance."""
+    n = 200
+    phi = .65
+    repetitions = 60
+    # Cov(X_t, X_{t+k}) = phi**k / (1-phi**2), innovation variance 1.
+    # Sum every diagonal of the n-by-n covariance matrix, then divide by n**2.
+    reference_variance = (n + 2 * sum((n - lag) * phi ** lag for lag in range(1, n))) / (n * n * (1 - phi * phi))
+    covered = {length: 0 for length in (1, 8, 16)}
+    variances = {length: [] for length in covered}
+    for replication in range(repetitions):
+        rng = np.random.default_rng(7000 + replication)
+        values = np.empty(n)
+        values[0] = rng.normal() / sqrt(1 - phi * phi)
+        for index in range(1, n):
+            values[index] = phi * values[index - 1] + rng.normal()
+        for length in covered:
+            samples = moving_block_bootstrap(generate_moving_blocks(pd.Series(values), length), n, 199, 8000 + replication)
+            summary = bootstrap_metrics([sum(sample) / n for sample in samples])
+            covered[length] += int(summary.ci_lower <= 0 <= summary.ci_upper)
+            variances[length].append(summary.std ** 2)
+    # Broad fixed-design bounds detect lost dependence, not a universal 95%
+    # guarantee. Sixty trials also have material binomial Monte Carlo error.
+    iid_ratio = sum(variances[1]) / repetitions / reference_variance
+    assert .12 < iid_ratio < .4
+    for length in (8, 16):
+        ratio = sum(variances[length]) / repetitions / reference_variance
+        assert .45 < ratio < 1.4
+        assert ratio > 2 * iid_ratio
+        assert covered[length] >= 45
+        assert covered[length] >= covered[1] + 6
