@@ -11,6 +11,7 @@ from alpha_research._utils import (
     _select_columns,
     _validate_df,
     _validate_finite_number,
+    _validate_key_values,
     _validate_positive_integer,
     _validate_same_backend,
     _validate_time_order,
@@ -486,3 +487,194 @@ def test_validate_finite_number_rejects_non_finite_values(value):
     """Should reject NaN and both infinity signs."""
     with pytest.raises(ValueError, match='value must be finite'):
         _validate_finite_number(value, 'value')
+
+
+# ------------------------------------------------------
+# Validation boundary contracts
+# ------------------------------------------------------
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('check_all_missing', [True, False])
+def test_validate_df_rejects_empty_frames_directly(constructor, check_all_missing):
+    """Should reject empty frames even when all-missing columns are allowed."""
+    frame = constructor({'x': []})
+    with pytest.raises(ValueError, match='must not be empty'):
+        _validate_df(frame, ['x'], check_all_missing=check_all_missing)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('columns', ['x', ('x',), None, [1], [None], [''], [['x']]])
+def test_validate_df_rejects_malformed_required_columns(constructor, columns):
+    """Should reject ambiguous column specifications before selecting data."""
+    with pytest.raises(TypeError, match='required_cols must be a list'):
+        _validate_df(constructor({'x': [1]}), columns)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_validate_df_allows_empty_required_columns(constructor):
+    """Should retain frame-only validation without rejecting unused missing data."""
+    _validate_df(constructor({'unused': [None]}), [], check_all_missing=False)
+
+
+@pytest.mark.parametrize('check_all_missing', [True, False])
+def test_validate_df_rejects_ambiguous_selected_columns(check_all_missing):
+    """Should report duplicated requested labels independently of missing policy."""
+    frame = pd.DataFrame([[1, 2]], columns=['x', 'x'])
+    with pytest.raises(ValueError, match='required column names must be unique.*x'):
+        _validate_df(frame, ['x'], check_all_missing=check_all_missing)
+
+
+def test_validate_df_ignores_unused_duplicate_columns():
+    """Should validate unambiguous requested columns without inspecting unused labels."""
+    frame = pd.DataFrame([[1, 2, 3]], columns=['x', 'unused', 'unused'])
+    _validate_df(frame, ['x'])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('key', ['time', 'symbol'])
+@pytest.mark.parametrize('missing', [None, np.nan])
+@pytest.mark.parametrize('position', [0, 1, 2])
+def test_validate_key_values_rejects_partial_missing_keys(constructor, key, missing, position):
+    """Should recognize native null and NaN keys at every row position."""
+    data = {'time': [1., 2., 3.], 'symbol': [10., 20., 30.]}
+    data[key][position] = missing
+    with pytest.raises(ValueError, match=f'{key} must not contain missing values'):
+        _validate_key_values(constructor(data), ['time', 'symbol'])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('key', ['time', 'symbol'])
+@pytest.mark.parametrize('infinite', [np.inf, -np.inf])
+def test_validate_key_values_rejects_infinite_keys(constructor, key, infinite):
+    """Should reject both signs of infinity in either numeric key."""
+    data = {'time': [1., 2.], 'symbol': [10., 20.]}
+    data[key][1] = infinite
+    with pytest.raises(ValueError, match=f'{key} must contain only finite values'):
+        _validate_key_values(constructor(data), ['time', 'symbol'])
+
+
+@pytest.mark.parametrize('dtype', [object, 'category', 'Float64'])
+def test_validate_key_values_rejects_infinity_in_pandas_storage_types(dtype):
+    """Should detect infinite scalars in object, categorical, and nullable keys."""
+    frame = pd.DataFrame({'time': pd.Series([1., np.inf], dtype=dtype)})
+    with pytest.raises(ValueError, match='only finite values'):
+        _validate_key_values(frame, ['time'])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_validate_key_values_preserves_values_and_does_not_require_unique_keys(constructor):
+    """Should validate key contents separately from ordering and uniqueness."""
+    frame = constructor({'time': [2, 1, 1], 'symbol': ['B', 'A', 'A'], 'unused': [None] * 3})
+    before = frame.copy(deep=True) if isinstance(frame, pd.DataFrame) else frame.clone()
+    _validate_key_values(frame, ['time', 'symbol'])
+    if isinstance(frame, pd.DataFrame):
+        pd.testing.assert_frame_equal(frame, before)
+    else:
+        assert frame.equals(before)
+
+
+def test_validate_key_values_rejects_unsupported_frame():
+    """Should reject unsupported containers before accessing their keys."""
+    with pytest.raises(TypeError, match='Pandas or Polars'):
+        _validate_key_values({'time': [1]}, ['time'])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_validate_key_values_checks_schema_and_empty_frames(constructor):
+    """Should expose missing-column and empty-frame failures consistently."""
+    with pytest.raises(KeyError, match='time'):
+        _validate_key_values(constructor({'x': [1]}), ['time'])
+    with pytest.raises(ValueError, match='must not be empty'):
+        _validate_key_values(constructor({'time': []}), ['time'])
+    with pytest.raises(TypeError, match='required_cols'):
+        _validate_key_values(constructor({'time': [1]}), 'time')
+
+
+def test_validate_key_values_rejects_ambiguous_columns():
+    """Should reject duplicate selected key labels with an actionable error."""
+    with pytest.raises(ValueError, match='unique.*time'):
+        _validate_key_values(pd.DataFrame([[1, 2]], columns=['time', 'time']), ['time'])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('values', [[np.nan, 1., 2.], [1., np.nan, 2.], [1., 2., np.nan],
+                                   [None, 1., 2.], [1., None, 2.], [1., 2., None]])
+def test_validate_time_order_rejects_all_missing_positions(constructor, values):
+    """Should reject missing time keys even when the backend considers them sorted."""
+    with pytest.raises(ValueError, match='must not contain missing values'):
+        _validate_time_order(constructor({'time': values}), 'time')
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('values', [[-np.inf, 1.], [1., np.inf]])
+def test_validate_time_order_rejects_sorted_infinities(constructor, values):
+    """Should reject infinite time keys despite otherwise increasing order."""
+    with pytest.raises(ValueError, match='only finite values'):
+        _validate_time_order(constructor({'time': values}), 'time')
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_validate_time_order_accepts_singleton_and_aware_times(constructor):
+    """Should accept one observation and chronological timezone-aware timestamps."""
+    _validate_time_order(constructor({'time': [1]}), 'time')
+    dates = pd.date_range('2024-11-03 00:30', periods=4, freq='h', tz='America/New_York')
+    _validate_time_order(constructor({'time': dates}), 'time')
+
+
+@pytest.mark.parametrize('value', [np.bool_(True), np.timedelta64(1, 'D'), np.timedelta64('NaT'),
+                                 np.datetime64('2024-01-01'), None, np.nan, np.inf, 1 + 0j])
+def test_validate_positive_integer_rejects_other_scalar_types(value):
+    """Should reject temporal and noninteger scalars instead of accepting durations."""
+    with pytest.raises(ValueError, match='value must be a positive integer'):
+        _validate_positive_integer(value, 'value')
+
+
+@pytest.mark.parametrize('value', [np.int8(1), np.uint64(2), 10 ** 400])
+def test_validate_positive_integer_does_not_impose_an_unrelated_size_limit(value):
+    """Should leave operation-specific size limits to the caller."""
+    _validate_positive_integer(value, 'value')
+
+
+@pytest.mark.parametrize('value', [np.bool_(True), np.timedelta64(1, 'D'), np.timedelta64('NaT'),
+                                 np.datetime64('2024-01-01'), np.array([1.]), np.array(1.)])
+def test_validate_finite_number_rejects_temporal_and_array_values(value):
+    """Should reject unsupported scalar types with the parameter-specific message."""
+    with pytest.raises(TypeError, match='value must be numeric'):
+        _validate_finite_number(value, 'value')
+
+
+@pytest.mark.parametrize('value', [10 ** 400, -(10 ** 400)])
+def test_validate_finite_number_normalizes_overflow_errors(value):
+    """Should reject unrepresentable real parameters with a documented ValueError."""
+    with pytest.raises(ValueError, match='value must be finite'):
+        _validate_finite_number(value, 'value')
+
+
+# ------------------------------------------------------
+# Public consumers of shared validators
+# ------------------------------------------------------
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_positive_integer_hardening_reaches_public_consumers(constructor):
+    """Should reject durations before return, trend, and block-generation calculations."""
+    from alpha_research.features.targets import fwd_returns
+    from alpha_research.features.trend import price_to_sma_ratio
+    from alpha_research.resampling.block_bootstrap import generate_moving_blocks
+
+    frame = constructor({'time': [1, 2, 3], 'symbol': ['A'] * 3, 'close': [10., 11., 12.]})
+    invalid = np.timedelta64(1, 'D')
+    with pytest.raises(ValueError, match='horizon must be a positive integer'):
+        fwd_returns(frame, invalid)
+    with pytest.raises(ValueError, match='window must be a positive integer'):
+        price_to_sma_ratio(frame, invalid)
+    with pytest.raises(ValueError, match='block_length must be a positive integer'):
+        generate_moving_blocks(frame, invalid)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_time_key_hardening_reaches_temporal_association(constructor):
+    """Should reject a trailing NaN time instead of computing an apparently valid association."""
+    from alpha_research.evaluation.timeseries import temporal_association
+
+    frame = constructor({'time': [1., 2., np.nan], 'symbol': ['A'] * 3,
+                         'x': [1., 2., 3.], 'y': [2., 1., 3.]})
+    with pytest.raises(ValueError, match='time must not contain missing values'):
+        temporal_association(frame, 'x', 'y')

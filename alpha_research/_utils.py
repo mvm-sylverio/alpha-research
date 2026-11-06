@@ -40,7 +40,8 @@ def _validate_df(
     df : pd.DataFrame | pl.DataFrame
         df which will be validated.
     required_cols : list[str]
-        Columns required to exist in the df.
+        Non-empty column names required to exist in the df. An empty list is
+        allowed when only frame-level validation is needed.
     check_all_missing : bool, default True
         Whether every required column must contain at least one non-missing
         value. Set to False for result frames where an all-missing diagnostic
@@ -49,19 +50,23 @@ def _validate_df(
     Raises
     ------
     TypeError
-        If df is not pandas or polars type, or check_all_missing is not
-        boolean.
+        If df is not pandas or polars type, required_cols is not a list of
+        non-empty strings, or check_all_missing is not boolean.
     KeyError
         If columns in required_cols are not columns of the df.
     ValueError
         If DataFrame is empty or, when check_all_missing is True, required
-        columns are missing all values.
+        columns are missing all values, or a required column name is ambiguous.
     """
     if type(check_all_missing) is not bool:
         raise TypeError('check_all_missing must be boolean.')
 
     # Check DataFrame type
     _validate_df_type(df)
+    if not isinstance(required_cols, list) or any(
+            not isinstance(column, str) or not column for column in required_cols
+    ):
+        raise TypeError('required_cols must be a list of non-empty column-name strings.')
 
     # Check for empty DataFrame
     if len(df) == 0:
@@ -72,6 +77,11 @@ def _validate_df(
 
     if missing_cols:
         raise KeyError(f'missing required columns in DataFrame: {missing_cols}.')
+
+    if isinstance(df, pd.DataFrame):
+        ambiguous = df.columns[df.columns.duplicated()].intersection(required_cols).to_list()
+        if ambiguous:
+            raise ValueError(f'required column names must be unique in DataFrame: {ambiguous}.')
 
     if check_all_missing:
         # Check None/NaN values on all columns
@@ -271,6 +281,62 @@ def _validate_unique_keys(
         )
 
 
+def _validate_key_values(
+        df: pd.DataFrame | pl.DataFrame,
+        keys: list[str],
+) -> None:
+    """Validate that observation keys contain no missing or infinite values.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Non-empty observations containing the requested keys.
+    keys : list[str]
+        Key-column names. Uniqueness and temporal order are separate checks.
+
+    Returns
+    -------
+    None
+        Returns None when all key values are present and finite where numeric.
+
+    Raises
+    ------
+    TypeError
+        If df or the column specification has an unsupported type.
+    KeyError
+        If a key column is absent.
+    ValueError
+        If the frame is empty, a selected column is ambiguous, or a key
+        contains missing or infinite values.
+    """
+    _validate_df(df, keys, check_all_missing=False)
+    for key in keys:
+        series = df[key]
+        if isinstance(series, pd.Series):
+            has_missing = series.isna().any()
+            # Object and categorical keys may also contain numeric scalars.
+            values = series.to_numpy()
+            if values.dtype.kind in 'fc':
+                has_infinite = np.isinf(values).any()
+            elif values.dtype.kind == 'O' and not pd.api.types.is_datetime64_any_dtype(series.dtype):
+                has_infinite = any(
+                    isinstance(value, (float, complex, np.inexact)) and not np.isfinite(value)
+                    for value in values
+                )
+            else:
+                has_infinite = False
+        else:
+            has_missing = series.is_null().any()
+            has_infinite = False
+            if series.dtype.is_float():
+                has_missing = has_missing or series.is_nan().any()
+                has_infinite = series.is_infinite().any()
+        if has_missing:
+            raise ValueError(f'{key} must not contain missing values.')
+        if has_infinite:
+            raise ValueError(f'{key} must contain only finite values.')
+
+
 def _validate_time_order(
         df: pd.DataFrame | pl.DataFrame,
         time_col: str,
@@ -296,28 +362,22 @@ def _validate_time_order(
     KeyError
         If time_col is not a column of df.
     ValueError
-        If time_col contains missing values, duplicates, or is not increasingly
-        ordered.
+        If time_col contains missing or infinite values, duplicates, or is not
+        increasingly ordered.
 
     Notes
     -----
     This function validates the single-series temporal contract. Multi-asset
     callers should validate time order independently within each asset.
     """
-    _validate_df(df, [time_col])
+    _validate_key_values(df, [time_col])
     _validate_unique_keys(df, [time_col], 'df')
 
     time_series = df[time_col]
 
     if isinstance(df, pd.DataFrame):
-        if time_series.isna().any():
-            raise ValueError(f'{time_col} must not contain missing values.')
-
         is_ordered = time_series.is_monotonic_increasing
     else:
-        if time_series.is_null().any():
-            raise ValueError(f'{time_col} must not contain missing values.')
-
         is_ordered = time_series.is_sorted()
 
     if not is_ordered:
@@ -346,7 +406,8 @@ def _validate_positive_integer(value: int, name: str) -> None:
     ValueError
         If value is not an integer, is a boolean, or is less than one.
     """
-    if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value <= 0:
+    if (not isinstance(value, (int, np.integer))
+            or isinstance(value, (bool, np.bool_, np.timedelta64)) or value <= 0):
         raise ValueError(f'{name} must be a positive integer.')
 
 
@@ -370,11 +431,14 @@ def _validate_finite_number(value: Real, name: str) -> float:
     TypeError
         If value is not a real number or is a boolean.
     ValueError
-        If value is NaN or infinite.
+        If value is NaN, infinite, or not representable as a finite float.
     """
-    if not isinstance(value, Real) or isinstance(value, bool):
+    if not isinstance(value, Real) or isinstance(value, (bool, np.bool_, np.timedelta64)):
         raise TypeError(f'{name} must be numeric.')
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except OverflowError as error:
+        raise ValueError(f'{name} must be finite and representable as a float.') from error
     if not math.isfinite(normalized):
         raise ValueError(f'{name} must be finite.')
     return normalized
