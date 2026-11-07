@@ -1,11 +1,15 @@
+import warnings
+
+import numpy as np
 import pandas as pd
 import polars as pl
 from dateutil.relativedelta import relativedelta
-import warnings
-import numpy as np
 
-
-from alpha_research._utils import _validate_df, _validate_positive_integer, _validate_finite_number
+from alpha_research._utils import (
+    _validate_df,
+    _validate_finite_number,
+    _validate_positive_integer,
+)
 
 
 def _split_dates(df, column):
@@ -134,8 +138,8 @@ def research_test_split(
     _validate_positive_integer(min_test_unique_pts, 'min_test_unique_pts')
     if purging_coefficient < 1:
         raise ValueError(
-            f"purging_coefficient must be >= 1.0. "
-            f"A value < 1 would place research_end after test_start, causing severe leakage."
+            "purging_coefficient must be >= 1.0. "
+            "A value < 1 would place research_end after test_start, causing severe leakage."
         )
 
     _validate_df(df, [time_col])

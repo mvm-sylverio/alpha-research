@@ -17,8 +17,8 @@ from alpha_research.visualization._utils import (
 )
 
 __all__ = [
-    'plot_time_series_value',
     'plot_cross_sectional_value_summary',
+    'plot_time_series_value',
 ]
 
 

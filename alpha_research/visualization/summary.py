@@ -15,8 +15,8 @@ from alpha_research.visualization._utils import (
 __all__ = [
     'plot_ic_summary',
     'plot_partial_ic_summary',
-    'plot_temporal_association_summary',
     'plot_partial_temporal_association_summary',
+    'plot_temporal_association_summary',
 ]
 
 
@@ -417,7 +417,7 @@ def _create_axis(ax: Any, n_features: int) -> tuple[Any, bool]:
         If ``n_features`` is not a positive integer.
     """
     if not isinstance(n_features, (int, np.integer)) or isinstance(n_features, (bool, np.timedelta64)):
-        raise ValueError('n_features must be a positive integer.')
+        raise ValueError('n_features must be a positive integer.')  # noqa: TRY004 - Preserve the existing ValueError API contract.
     if n_features < 1:
         raise ValueError('n_features must be a positive integer.')
 

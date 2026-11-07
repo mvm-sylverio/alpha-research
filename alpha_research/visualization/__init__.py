@@ -23,11 +23,11 @@ from alpha_research.visualization.timeseries import (
 )
 
 __all__ = [
+    'plot_cross_sectional_value_summary',
+    'plot_decay_curves',
     'plot_distribution_histogram',
     'plot_distribution_qq',
     'plot_distribution_quantiles',
-    'plot_cross_sectional_value_summary',
-    'plot_decay_curves',
     'plot_feature_target_bins',
     'plot_feature_target_scatter',
     'plot_ic_summary',

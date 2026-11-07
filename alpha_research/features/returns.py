@@ -1,10 +1,13 @@
+import numpy as np
 import pandas as pd
 import polars as pl
-import numpy as np
 
-from alpha_research.features.targets import _valid_price_expression, _validate_return_input
+from alpha_research.features.targets import (
+    _valid_price_expression,
+    _validate_return_input,
+)
 
-__all__ = ['simple_returns', 'log_returns']
+__all__ = ['log_returns', 'simple_returns']
 
 
 def simple_returns(

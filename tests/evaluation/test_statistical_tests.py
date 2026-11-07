@@ -1,15 +1,15 @@
-import pytest
+import numpy as np
 import pandas as pd
 import polars as pl
-import numpy as np
+import pytest
 from scipy.stats import norm
 
 from alpha_research.evaluation.statistical_tests import (
     ADFTestResult,
     NWTestResult,
+    WaldTemporalAssociationTestResult,
     _contiguous_numeric_series,
     _newey_west_with_continuity,
-    WaldTemporalAssociationTestResult,
     adf_test,
     benjamini_hochberg,
     benjamini_yekutieli,

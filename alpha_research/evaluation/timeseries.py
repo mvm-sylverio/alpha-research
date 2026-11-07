@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -31,31 +31,32 @@ from alpha_research.features.schema import (
     get_feature_name,
     join_feature_target_frames,
 )
+from alpha_research.progress import (
+    ProgressCallback,
+    _progress_iter,
+    _progress_kwargs,
+    _validate_progress_callback,
+)
 from alpha_research.resampling.block_bootstrap import (
     bootstrap_metrics,
     generate_moving_blocks,
     moving_block_bootstrap,
 )
 
-from alpha_research.progress import (
-    ProgressCallback, _progress_iter, _progress_kwargs, _validate_progress_callback,
-)
-
-
 __all__ = [
-    'temporal_association',
-    'partial_temporal_association',
-    'temporal_association_summary_table',
-    'partial_temporal_association_summary_table',
-    'TemporalAssociationDecayResult',
-    'temporal_association_decay',
-    'TemporalAssociationDecaySummaryResult',
-    'temporal_association_decay_summary',
-    'TemporalAssociationDecaySummaryTableResult',
-    'temporal_association_decay_summary_table',
     'RollingTemporalAssociationResult',
+    'TemporalAssociationDecayResult',
+    'TemporalAssociationDecaySummaryResult',
+    'TemporalAssociationDecaySummaryTableResult',
+    'partial_temporal_association',
+    'partial_temporal_association_summary_table',
     'rolling_temporal_association',
     'summarize_rolling_temporal_association',
+    'temporal_association',
+    'temporal_association_decay',
+    'temporal_association_decay_summary',
+    'temporal_association_decay_summary_table',
+    'temporal_association_summary_table',
 ]
 
 

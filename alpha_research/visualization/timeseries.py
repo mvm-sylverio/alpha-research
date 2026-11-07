@@ -73,7 +73,7 @@ def plot_rolling_temporal_association(
     must be ordered, but a percentile interval may exclude the point estimate.
     """
     if not isinstance(band_alpha, (int, float, np.integer, np.floating)) or isinstance(band_alpha, (bool, np.timedelta64)):
-        raise ValueError('band_alpha must be a number between zero and one.')
+        raise ValueError('band_alpha must be a number between zero and one.')  # noqa: TRY004 - Preserve the existing ValueError API contract.
 
     if not 0.0 <= band_alpha <= 1.0:
         raise ValueError('band_alpha must be a number between zero and one.')

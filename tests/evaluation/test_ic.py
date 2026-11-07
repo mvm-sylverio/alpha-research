@@ -1,22 +1,24 @@
-import pytest
+from math import erf, erfc, sqrt
+
 import numpy as np
 import pandas as pd
 import polars as pl
-from math import erf, erfc, sqrt
+import pytest
+
 from alpha_research.evaluation.ic import (
-    compute_ic,
-    compute_ic_metrics,
+    PartialICSummaryResult,
     _generate_target_frames,
     _ic_decay_from_target_frames,
+    _validate_ic_keys,
+    compute_ic,
+    compute_ic_metrics,
     ic_decay,
     ic_decay_summary,
     ic_decay_summary_table,
     ic_summary_table,
     information_coefficient,
-    PartialICSummaryResult,
     partial_ic_summary_table,
     partial_information_coefficient,
-    _validate_ic_keys,
 )
 from alpha_research.evaluation.partial import partial_correlation
 
@@ -1061,7 +1063,7 @@ def test_ic_summary_table_feature_group_unknown(cross_section_df_pandas):
 def test_ic_summary_table_empty_list_raises(cross_section_df_pandas):
     """table should raise ValueError for empty feature_list."""
     with pytest.raises(ValueError, match="empty"):
-        ic_summary_table(cross_section_df_pandas, [], 'target').table
+        _ = ic_summary_table(cross_section_df_pandas, [], 'target').table
 
 def test_ic_summary_table_polars(cross_section_df_polars):
     """table should return pl.DataFrame for polars input."""
@@ -1664,7 +1666,7 @@ def test_ic_decay_summary_table_reuses_targets_for_all_features(
         calls.append(horizon)
         return target_data[['time', 'symbol', f'target_{horizon}']]
 
-    result = ic_decay_summary_table(
+    ic_decay_summary_table(
         df_features=decay_features_df_pandas,
         feature_list=['feature_a', 'feature_b'],
         target_data=decay_target_data_pandas,

@@ -1,21 +1,35 @@
-from dataclasses import dataclass
+import math
 from collections.abc import Hashable
+from dataclasses import dataclass
 from typing import Literal, cast
 
-import polars as pl
-import pandas as pd
 import numpy as np
+import pandas as pd
+import polars as pl
 import statsmodels.api as sm
-from statsmodels.tsa.stattools import adfuller
-from statsmodels.stats.multitest import multipletests
 from scipy.stats import norm
-import math
+from statsmodels.stats.multitest import multipletests
+from statsmodels.tsa.stattools import adfuller
 
-from alpha_research._utils import _has_missing_values, _validate_df, _validate_positive_integer, _validate_probability
+from alpha_research._utils import (
+    _has_missing_values,
+    _validate_df,
+    _validate_positive_integer,
+    _validate_probability,
+)
 
-__all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult', 'fdr_correction',
-           'benjamini_hochberg', 'benjamini_yekutieli', 'WaldTemporalAssociationTestResult',
-           'wald_temporal_association_test']
+__all__ = [
+    'ADFTestResult',
+    'NWTestResult',
+    'WaldTemporalAssociationTestResult',
+    'adf_test',
+    'benjamini_hochberg',
+    'benjamini_yekutieli',
+    'fdr_correction',
+    'newey_west_tstat',
+    'stationarity_test',
+    'wald_temporal_association_test',
+]
 
 
 def _contiguous_numeric_series(series: pd.Series | pl.Series) -> np.ndarray:

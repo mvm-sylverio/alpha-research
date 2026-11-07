@@ -11,8 +11,8 @@ from alpha_research.features.volatility import (
     _valid_ohlc_values,
     _validate_annualization_factor,
     _wilder_smoothing_by_symbol,
-    average_true_range,
     atr,
+    average_true_range,
     realized_volatility,
 )
 

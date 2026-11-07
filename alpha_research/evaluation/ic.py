@@ -1,18 +1,12 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
-import polars as pl
-import pandas as pd
 import numpy as np
-from typing import Literal, Callable
-
+import pandas as pd
+import polars as pl
 from scipy.stats import pearsonr, spearmanr
 
-from alpha_research.evaluation.statistical_tests import fdr_correction, _newey_west_with_continuity
-from alpha_research.evaluation.partial import (
-    _validate_partial_columns,
-    _validate_min_n,
-    partial_correlation,
-)
 from alpha_research._utils import (
     _normalize_covariates,
     _validate_df,
@@ -21,16 +15,36 @@ from alpha_research._utils import (
     _validate_key_values,
     _validate_same_backend,
 )
+from alpha_research.evaluation.partial import (
+    _validate_min_n,
+    _validate_partial_columns,
+    partial_correlation,
+)
+from alpha_research.evaluation.statistical_tests import (
+    _newey_west_with_continuity,
+    fdr_correction,
+)
 from alpha_research.features.schema import get_feature_name, join_feature_target_frames
-
 from alpha_research.progress import (
-    ProgressCallback, _progress_iter, _progress_kwargs, _validate_progress_callback,
+    ProgressCallback,
+    _progress_iter,
+    _progress_kwargs,
+    _validate_progress_callback,
 )
 
-__all__ = ['information_coefficient', 'compute_ic', 'partial_information_coefficient',
-           'ICMetrics', 'compute_ic_metrics', 'ic_summary_table',
-           'PartialICSummaryResult', 'partial_ic_summary_table', 'ic_decay',
-           'ic_decay_summary', 'ic_decay_summary_table']
+__all__ = [
+    'ICMetrics',
+    'PartialICSummaryResult',
+    'compute_ic',
+    'compute_ic_metrics',
+    'ic_decay',
+    'ic_decay_summary',
+    'ic_decay_summary_table',
+    'ic_summary_table',
+    'information_coefficient',
+    'partial_ic_summary_table',
+    'partial_information_coefficient',
+]
 
 DataFrame = pd.DataFrame | pl.DataFrame
 TargetFn = Callable[[DataFrame, int], DataFrame]
@@ -127,7 +141,7 @@ def information_coefficient(
     elif corr_method == 'spearman':
         return spearmanr(x_arr, y_arr)[0]  # [0] is the correlation coefficient
     else:
-        raise ValueError(f"corr_method must be 'spearman' or 'pearson'.")
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
 
 
 def _compute_ic_pandas(

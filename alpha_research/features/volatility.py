@@ -13,9 +13,9 @@ from alpha_research.features.returns import log_returns
 from alpha_research.features.schema import get_feature_name
 
 __all__ = [
-    'realized_volatility',
-    'average_true_range',
     'atr',
+    'average_true_range',
+    'realized_volatility',
 ]
 
 
@@ -50,7 +50,7 @@ def _valid_ohlc_values(df, high_col, low_col, close_col):
 
 
 def _validate_annualization_factor(
-        annualization_factor: int | float | None,
+        annualization_factor: float | None,
 ) -> None:
     """
     Validate an optional positive annualization factor.
@@ -85,7 +85,7 @@ def _validate_annualization_factor(
         )
 
 
-def _format_annualization_factor(annualization_factor: int | float) -> str:
+def _format_annualization_factor(annualization_factor: float) -> str:
     """
     Format an annualization factor for an unambiguous feature name to be
     returned in correct str format.
@@ -289,7 +289,7 @@ def realized_volatility(
         df: pd.DataFrame | pl.DataFrame,
         window: int,
         price_col: str = 'close',
-        annualization_factor: int | float | None = None,
+        annualization_factor: float | None = None,
         symbol_col: str = 'symbol',
         time_col: str = 'time',
 ) -> pd.DataFrame | pl.DataFrame:

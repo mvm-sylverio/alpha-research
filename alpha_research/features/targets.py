@@ -1,9 +1,9 @@
 from numbers import Real
 from typing import Literal
 
-import polars as pl
-import pandas as pd
 import numpy as np
+import pandas as pd
+import polars as pl
 
 from alpha_research._utils import (
     _as_numpy_values,

@@ -1,8 +1,9 @@
-import pytest
 import numpy as np
 import pandas as pd
 import polars as pl
+import pytest
 
+from alpha_research.features.returns import simple_returns
 from alpha_research.features.targets import (
     _as_float_values,
     _barrier_values,
@@ -12,7 +13,7 @@ from alpha_research.features.targets import (
     fwd_returns,
     ohlc_triple_barrier_labels,
 )
-from alpha_research.features.returns import simple_returns
+
 
 # ------------------------------------------------------
 # fwd_returns

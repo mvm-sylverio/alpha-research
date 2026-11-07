@@ -1,11 +1,13 @@
-import pytest
-import polars as pl
 import numpy as np
 import pandas as pd
+import polars as pl
+import pytest
 
-from alpha_research.features.returns import simple_returns, log_returns
+from alpha_research.features.returns import log_returns, simple_returns
 from alpha_research.features.targets import (
-    _valid_price_expression, _validate_return_input, fwd_returns,
+    _valid_price_expression,
+    _validate_return_input,
+    fwd_returns,
 )
 
 

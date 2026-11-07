@@ -1,10 +1,11 @@
-import pytest
 import warnings
+
+import numpy as np
 import pandas as pd
 import polars as pl
-from alpha_research.data.splitting import research_test_split
-from alpha_research.data.splitting import _split_dates
-import numpy as np
+import pytest
+
+from alpha_research.data.splitting import _split_dates, research_test_split
 
 
 # ------------------------------------------------------
@@ -310,8 +311,8 @@ def test_split_rejects_zero_point_minima_and_excessive_purge(backend):
 def test_split_exact_research_minimum_thresholds(minimum, outcome):
     """Should accept the recommendation, warn at half, and reject below half."""
     frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=6)})
-    kwargs = dict(purging_coefficient=1, min_research_period=0, min_test_period=0,
-                  min_research_unique_pts=minimum, min_test_unique_pts=2)
+    kwargs = {'purging_coefficient': 1, 'min_research_period': 0, 'min_test_period': 0,
+              'min_research_unique_pts': minimum, 'min_test_unique_pts': 2}
     if outcome == 'error':
         with pytest.raises(ValueError, match='Research block too small'):
             research_test_split(frame, **kwargs)
@@ -333,8 +334,8 @@ def test_split_odd_point_minimum_uses_exact_half(backend, research_count):
     frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=research_count + 2)})
     if backend == 'polars':
         frame = pl.from_pandas(frame)
-    kwargs = dict(purging_coefficient=1, min_research_period=0, min_test_period=0,
-                  min_research_unique_pts=5, min_test_unique_pts=2)
+    kwargs = {'purging_coefficient': 1, 'min_research_period': 0, 'min_test_period': 0,
+              'min_research_unique_pts': 5, 'min_test_unique_pts': 2}
     if research_count == 2:
         with pytest.raises(ValueError, match='Minimum allowed: 3 dates'):
             research_test_split(frame, **kwargs)
@@ -353,8 +354,8 @@ def test_split_odd_month_minimum_uses_exact_half(backend, research_months):
     frame = pd.DataFrame({'time': pd.date_range('2024-01-01', periods=research_months + 2, freq='MS')})
     if backend == 'polars':
         frame = pl.from_pandas(frame)
-    kwargs = dict(purging_coefficient=1, min_research_period=5, min_test_period=0,
-                  min_research_unique_pts=1, min_test_unique_pts=1)
+    kwargs = {'purging_coefficient': 1, 'min_research_period': 5, 'min_test_period': 0,
+              'min_research_unique_pts': 1, 'min_test_unique_pts': 1}
     if research_months == 2:
         with pytest.raises(ValueError, match=r'Minimum allowed: 1 dates \(3 months\)'):
             research_test_split(frame, **kwargs)
