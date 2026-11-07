@@ -8,6 +8,64 @@ import pytest
 from alpha_research.visualization import plot_decay_curves
 
 
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_decay_plot_coordinates_intervals_and_significance_stay_aligned(constructor, plot_axis):
+    """Should sort numeric horizons and preserve each point's interval and decision."""
+    frame = constructor({'horizon': ['10', '2', '1'], 'value': [0.2, -0.3, 0.4],
+                         'lower': [0.1, -0.5, 0.3], 'upper': [0.4, -0.1, 0.5],
+                         'fdr_rejected': [False, True, None]})
+    original = frame.copy(deep=True) if isinstance(frame, pd.DataFrame) else frame.clone()
+    result = plot_decay_curves({'Curve': frame}, 'value', plot_axis, ci_lower_col='lower', ci_upper_col='upper')
+    np.testing.assert_allclose(result.lines[0].get_xdata(), [1., 2., 10.])
+    np.testing.assert_allclose(result.lines[0].get_ydata(), [0.4, -0.3, 0.2])
+    assert result.lines[0].get_label() == 'Curve'
+    bars = result.containers[0].lines[2][0].get_segments()
+    np.testing.assert_allclose(bars, [[[1., 0.3], [1., 0.5]], [[2., -0.5], [2., -0.1]], [[10., 0.1], [10., 0.4]]])
+    np.testing.assert_allclose(result.collections[-1].get_offsets(), [[2., -0.3]])
+    if isinstance(frame, pd.DataFrame):
+        pd.testing.assert_frame_equal(frame, original)
+    else:
+        assert frame.equals(original)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('decision', ['False', 'True', 0, 1])
+def test_decay_plot_rejects_non_boolean_decisions(constructor, decision, plot_axis):
+    """Should reject ambiguous significance values before modifying the supplied axis."""
+    frame = constructor({'horizon': [1], 'mean': [0.1], 'fdr_rejected': [decision]})
+    with pytest.raises(ValueError, match='boolean decisions'):
+        plot_decay_curves({'x': frame}, 'mean', plot_axis)
+    assert not plot_axis.lines and not plot_axis.collections
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('horizons', [[1, 1], ['1', '1.0'], [1., np.nan], [1., np.inf]])
+def test_decay_plot_rejects_duplicate_or_invalid_converted_horizons(constructor, horizons, plot_axis):
+    """Should validate identities after conversion to numeric horizon coordinates."""
+    frame = constructor({'horizon': horizons, 'mean': [0.1, 0.2]})
+    with pytest.raises(ValueError):
+        plot_decay_curves({'x': frame}, 'mean', plot_axis, significance_col=None)
+    assert not plot_axis.lines and not plot_axis.collections
+
+
+@pytest.mark.parametrize('bounds', [(0.3, 0.1), (0.3, 0.4)])
+def test_decay_plot_rejects_invalid_centered_intervals(bounds, plot_axis):
+    """Should reject reversed or non-containing centered error bars before drawing."""
+    frame = pd.DataFrame({'horizon': [1], 'mean': [0.2], 'lower': [bounds[0]], 'upper': [bounds[1]]})
+    with pytest.raises(ValueError, match='confidence limits'):
+        plot_decay_curves({'x': frame}, 'mean', plot_axis, ci_lower_col='lower', ci_upper_col='upper', significance_col=None)
+    assert not plot_axis.lines and not plot_axis.collections
+
+
+def test_decay_plot_omits_unavailable_intervals_and_retains_line_gaps(plot_axis):
+    """Should keep undefined points as gaps and display only complete finite error bars."""
+    frame = pd.DataFrame({'horizon': [1, 2, 3], 'mean': [0.2, np.inf, 0.4],
+                          'lower': [0.1, 0., np.nan], 'upper': [0.3, 0.2, np.inf]})
+    result = plot_decay_curves({'x': frame}, 'mean', plot_axis, ci_lower_col='lower', ci_upper_col='upper', significance_col=None)
+    np.testing.assert_allclose(result.lines[0].get_ydata(), [0.2, np.nan, 0.4], equal_nan=True)
+    np.testing.assert_allclose(result.containers[0].lines[2][0].get_segments(), [[[1., 0.1], [1., 0.3]]])
+
+
 # ------------------------------------------------------
 # fixtures
 # ------------------------------------------------------

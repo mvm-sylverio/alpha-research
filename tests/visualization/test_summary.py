@@ -23,6 +23,86 @@ from alpha_research.visualization.summary import (
 )
 
 
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_summary_plot_exact_ranking_coordinates_and_boolean_styles(constructor, plot_axis):
+    """Should place ranked estimates at their feature positions using FDR precedence."""
+    frame = constructor({'feature': ['small', 'inverse', 'positive'], 'mean': [0.1, -0.4, 0.3],
+                         'fdr_rejected': [False, True, False], 'reject_h0': [True, False, True]})
+    result = plot_ic_summary(frame, ax=plot_axis, title='Candidates')
+    np.testing.assert_allclose(result.collections[0].get_offsets(), [[-0.4, 0.]])
+    np.testing.assert_allclose(result.collections[1].get_offsets(), [[0.3, 1.], [0.1, 2.]])
+    assert [label.get_text() for label in result.get_yticklabels()] == ['inverse', 'positive', 'small']
+    assert result.get_title() == 'Candidates'
+    assert result.yaxis_inverted()
+    plot_ic_summary(frame, ax=result)
+    assert result.yaxis_inverted()
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('decision', ['False', 'True', 0, 1])
+def test_summary_plot_rejects_non_boolean_significance(constructor, decision, plot_axis):
+    """Should reject text and numeric flags before drawing a significance marker."""
+    frame = constructor({'feature': ['x'], 'mean': [0.2], 'fdr_rejected': [decision]})
+    with pytest.raises(ValueError, match='boolean decisions'):
+        plot_ic_summary(frame, ax=plot_axis)
+    assert not plot_axis.lines and not plot_axis.collections
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('bounds', [(0.5, 0.1), (0.3, 0.5)])
+def test_temporal_summary_rejects_invalid_wald_bounds(constructor, bounds, plot_axis):
+    """Should reject malformed finite Wald intervals instead of silently hiding them."""
+    frame = constructor({'feature': ['x'], 'association': [0.2],
+                         'wald_ci_lower': [bounds[0]], 'wald_ci_upper': [bounds[1]]})
+    with pytest.raises(ValueError, match='confidence limits'):
+        plot_temporal_association_summary(frame, ax=plot_axis)
+    assert not plot_axis.lines and not plot_axis.collections
+
+
+def test_temporal_summary_preserves_wald_endpoints_and_missing_intervals(plot_axis):
+    """Should display unclipped Wald bounds and keep estimates with unavailable intervals."""
+    frame = pd.DataFrame({'feature': ['wide', 'missing'], 'association': [0.9, 0.2],
+                          'wald_ci_lower': [0.8, np.nan], 'wald_ci_upper': [1.2, np.nan]})
+    result = plot_temporal_association_summary(frame, ax=plot_axis)
+    np.testing.assert_allclose(result.containers[0].lines[2][0].get_segments(), [[[0.8, 0.], [1.2, 0.]]])
+    np.testing.assert_allclose(result.collections[-1].get_offsets(), [[0.2, 1.]])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('labels', [['x', 'x'], ['x', None], ['x', ' ']])
+def test_summary_plot_rejects_ambiguous_feature_labels(constructor, labels, plot_axis):
+    """Should reject duplicate or missing feature identity before ranking."""
+    with pytest.raises(ValueError, match='feature names'):
+        plot_ic_summary(constructor({'feature': labels, 'mean': [0.1, 0.2]}), ax=plot_axis)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('labels', [['z', None], ['z', ' ']])
+def test_partial_summary_requires_complete_inferred_covariate_labels(constructor, labels, plot_axis):
+    """Should reject a missing conditioning specification on any displayed row."""
+    frame = constructor({'feature': ['x', 'y'], 'mean': [0.1, 0.2], 'covariates': labels})
+    with pytest.raises(ValueError, match='covariate specification'):
+        plot_partial_ic_summary(frame, ax=plot_axis)
+
+
+def test_summary_ranking_preserves_ties_index_and_source(plot_axis):
+    """Should retain stable input order for equal absolute values and leave source metadata intact."""
+    frame = pd.DataFrame({'feature': ['a', 'b', 'c'], 'mean': [-0.2, 0.2, 0.1]}, index=[9, 4, 9])
+    original = frame.copy(deep=True)
+    result = plot_ic_summary(frame, top_n=2, ax=plot_axis)
+    np.testing.assert_allclose(result.collections[0].get_offsets(), [[-0.2, 0.], [0.2, 1.]])
+    assert [text.get_text() for text in result.get_yticklabels()] == ['a', 'b']
+    pd.testing.assert_frame_equal(frame, original)
+
+
+def test_summary_helpers_reject_durations_as_feature_counts():
+    """Should reject duration scalars instead of treating them as integer counts."""
+    with pytest.raises(TypeError, match='top_n'):
+        _validate_ranking_arguments(np.timedelta64(1, 'D'), 'absolute', None)
+    with pytest.raises(ValueError, match='n_features'):
+        _create_axis(None, np.timedelta64(1, 'D'))
+
+
 # ------------------------------------------------------
 # fixtures
 # ------------------------------------------------------

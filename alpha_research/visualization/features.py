@@ -4,12 +4,21 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from alpha_research._utils import _validate_df
+from alpha_research._utils import (
+    _validate_df,
+    _validate_key_values,
+    _validate_time_order,
+    _validate_unique_keys,
+)
 from alpha_research.features.schema import get_feature_name
+from alpha_research.visualization._utils import (
+    _close_on_plot_error,
+    _plot_numeric_values,
+)
 
 __all__ = [
-    'plot_time_series_value',
     'plot_cross_sectional_value_summary',
+    'plot_time_series_value',
 ]
 
 
@@ -65,18 +74,22 @@ def plot_time_series_value(
         If value_frame is not a Pandas or Polars DataFrame.
     ValueError
         If the frame has multiple value columns without value_col, symbol is
-        ambiguous or absent, or the selected series has no finite values.
+        ambiguous or absent, keys are missing or duplicated, selected times
+        decrease, values are non-numeric, or the selection has no finite values.
 
     Notes
     -----
     This function is deliberately agnostic to whether the value is a feature
     or a target. It preserves input row order and does not sort the time axis;
-    callers should provide chronologically ordered feature or target frames.
+    the selected asset must have unique, increasingly ordered times. Numeric
+    infinities in values are displayed as gaps, just like NaN and null.
     """
     required_columns = [time_col, symbol_col]
     if value_col is not None:
         required_columns.append(value_col)
     _validate_df(value_frame, required_columns, check_all_missing=False)
+    _validate_key_values(value_frame, [time_col, symbol_col])
+    _validate_unique_keys(value_frame, [time_col, symbol_col], 'value_frame')
 
     if value_col is None:
         value_col = get_feature_name(
@@ -107,7 +120,8 @@ def plot_time_series_value(
     if selected.empty:
         raise ValueError(f'symbol {symbol!r} is not present in value_frame.')
 
-    values = selected[value_col].to_numpy(dtype=float)
+    _validate_time_order(selected, time_col)
+    values = _plot_numeric_values(selected[value_col], value_col)
     if not np.isfinite(values).any():
         raise ValueError('selected value series must contain at least one finite value.')
 
@@ -118,19 +132,21 @@ def plot_time_series_value(
             'Matplotlib is required for plotting. Install alpha-research[viz].',
         ) from error
 
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
 
-    ax.plot(
-        selected[time_col].to_numpy(),
-        values,
-        color=color,
-        label=value_col if label is None else label,
-    )
-    ax.set_xlabel(time_col)
-    ax.set_ylabel(value_col)
-    if title is not None:
-        ax.set_title(title)
+    with _close_on_plot_error(ax, created_axis):
+        ax.plot(
+            selected[time_col].to_numpy(),
+            values,
+            color=color,
+            label=value_col if label is None else label,
+        )
+        ax.set_xlabel(time_col)
+        ax.set_ylabel(value_col)
+        if title is not None:
+            ax.set_title(title)
 
     return ax
 
@@ -194,20 +210,24 @@ def plot_cross_sectional_value_summary(
         parameter has an invalid type.
     ValueError
         If the frame has multiple value columns without value_col, quantile or
-        band_alpha parameters are invalid, or no finite values are available.
+        band_alpha parameters are invalid, keys are missing or duplicated,
+        values are non-numeric, or no finite values are available.
 
     Notes
     -----
     This function is deliberately agnostic to whether the value is a feature
     or a target. Each displayed date summarizes the values across all available
     symbols at that date. It is not a temporal association calculation.
+    Dates are displayed in increasing order. Missing and infinite values are
+    excluded independently within each date; dates with no finite values remain
+    gaps. Each time-symbol pair must identify exactly one observation.
     """
     for name, value in [
         ('lower_quantile', lower_quantile),
         ('upper_quantile', upper_quantile),
         ('band_alpha', band_alpha),
     ]:
-        if not isinstance(value, (int, float, np.integer, np.floating)) or isinstance(value, bool):
+        if not isinstance(value, (int, float, np.integer, np.floating)) or isinstance(value, (bool, np.timedelta64)):
             raise TypeError(f'{name} must be a number.')
 
     if not 0 <= lower_quantile < upper_quantile <= 1:
@@ -222,6 +242,8 @@ def plot_cross_sectional_value_summary(
     if value_col is not None:
         required_columns.append(value_col)
     _validate_df(value_frame, required_columns, check_all_missing=False)
+    _validate_key_values(value_frame, [time_col, symbol_col])
+    _validate_unique_keys(value_frame, [time_col, symbol_col], 'value_frame')
 
     if value_col is None:
         value_col = get_feature_name(
@@ -235,8 +257,8 @@ def plot_cross_sectional_value_summary(
         if isinstance(value_frame, pd.DataFrame)
         else value_frame.select([time_col, symbol_col, value_col]).to_pandas()
     )
-    pandas_frame[value_col] = pd.to_numeric(pandas_frame[value_col], errors='coerce')
-    summary = pandas_frame.groupby(time_col, sort=False)[value_col].agg(
+    pandas_frame[value_col] = _plot_numeric_values(pandas_frame[value_col], value_col)
+    summary = pandas_frame.groupby(time_col, sort=True)[value_col].agg(
         median='median',
         lower=lambda values: values.quantile(lower_quantile),
         upper=lambda values: values.quantile(upper_quantile),
@@ -252,23 +274,25 @@ def plot_cross_sectional_value_summary(
             'Matplotlib is required for plotting. Install alpha-research[viz].',
         ) from error
 
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
 
     times = summary[time_col].to_numpy()
     lower = summary['lower'].to_numpy(dtype=float)
     upper = summary['upper'].to_numpy(dtype=float)
     median = summary['median'].to_numpy(dtype=float)
-    ax.fill_between(times, lower, upper, color=color, alpha=band_alpha)
-    ax.plot(
-        times,
-        median,
-        color=color,
-        label=f'{value_col} median' if label is None else label,
-    )
-    ax.set_xlabel(time_col)
-    ax.set_ylabel(value_col)
-    if title is not None:
-        ax.set_title(title)
+    with _close_on_plot_error(ax, created_axis):
+        ax.fill_between(times, lower, upper, color=color, alpha=band_alpha)
+        ax.plot(
+            times,
+            median,
+            color=color,
+            label=f'{value_col} median' if label is None else label,
+        )
+        ax.set_xlabel(time_col)
+        ax.set_ylabel(value_col)
+        if title is not None:
+            ax.set_title(title)
 
     return ax

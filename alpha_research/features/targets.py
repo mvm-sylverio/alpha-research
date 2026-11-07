@@ -1,13 +1,72 @@
 from numbers import Real
 from typing import Literal
 
-import polars as pl
-import pandas as pd
 import numpy as np
+import pandas as pd
+import polars as pl
 
-from alpha_research._utils import _validate_df, _validate_positive_integer
+from alpha_research._utils import (
+    _as_numpy_values,
+    _validate_and_group_times,
+    _validate_df,
+    _validate_positive_integer,
+)
 
 __all__ = ['fwd_returns', 'ohlc_triple_barrier_labels']
+
+
+def _valid_price_expression(price_col: str) -> pl.Expr:
+    """Build a Polars expression that masks invalid prices.
+
+    Parameters
+    ----------
+    price_col : str
+        Numeric price column.
+
+    Returns
+    -------
+    pl.Expr
+        Positive finite prices as Float64, with invalid prices set to null.
+
+    Raises
+    ------
+    TypeError
+        If price_col is not a string.
+    """
+    if not isinstance(price_col, str):
+        raise TypeError('price_col must be a string.')
+    price = pl.col(price_col).cast(pl.Float64)
+    return pl.when(price.is_finite() & (price > 0)).then(price).otherwise(None)
+
+
+def _validate_return_input(df, horizon, price_col, symbol_col, time_col):
+    """Validate temporal return inputs.
+
+    Parameters
+    ----------
+    df : pd.DataFrame | pl.DataFrame
+        Input observations.
+    horizon : int
+        Positive number of bars.
+    price_col, symbol_col, time_col : str
+        Price and temporal key columns.
+
+    Returns
+    -------
+    None
+        Returns None when the input contract is satisfied.
+
+    Raises
+    ------
+    TypeError, KeyError, ValueError
+        If the frame, columns, horizon or temporal keys are invalid.
+    """
+    _validate_positive_integer(horizon, 'horizon')
+    _validate_df(df, [time_col, symbol_col, price_col], check_all_missing=False)
+    _validate_and_group_times(
+        _as_numpy_values(df, symbol_col), _as_numpy_values(df, time_col),
+        symbol_col, time_col,
+    )
 
 
 def fwd_returns(
@@ -26,7 +85,7 @@ def fwd_returns(
         Wide DataFrame (usually a full OHLCV) with at least the columns price_col,
         symbol_col and time_col.
     horizon : int
-        Forward horizon in which the forward returns will be computed.
+        Positive number of future observations per symbol.
     price_col : str
         Price column in which the forward returns will be computed. Usually the close
         price column.
@@ -47,20 +106,33 @@ def fwd_returns(
         If time_col, symbol_col, price_col are not columns of the df.
     TypeError
         If df is not pandas or polars type.
+    ValueError
+        If horizon is not a positive integer or keys are missing, duplicated,
+        or out of chronological order within a symbol.
+
+    Notes
+    -----
+    Non-positive or non-finite prices yield missing returns for affected pairs.
+    A horizon at least as long as a symbol's history yields missing values.
     """
-    _validate_df(df, [time_col, symbol_col, price_col])
+    _validate_return_input(df, horizon, price_col, symbol_col, time_col)
 
     if isinstance(df, pd.DataFrame):
         result = df[[time_col, symbol_col]].copy()
-        fwd_price = df.groupby(symbol_col)[price_col].shift(-horizon)
-        result[f'fwd_ret_{horizon}'] = fwd_price / df[price_col] - 1
+        price = pd.to_numeric(df[price_col], errors='raise').astype(float)
+        price = price.where(np.isfinite(price) & (price > 0))
+        fwd_price = price.groupby(df[symbol_col]).shift(-horizon)
+        result[f'fwd_ret_{horizon}'] = (fwd_price / price - 1).replace([np.inf, -np.inf], np.nan)
         return result
 
     else:  # pl.Dataframe type
+        price = _valid_price_expression(price_col)
+        future_price = price.shift(-horizon).over(symbol_col)
         return df.select([
             time_col,
             symbol_col,
-            (pl.col(price_col).shift(-horizon) / pl.col(price_col) - 1).over(symbol_col)
+            (future_price / price - 1)
+            .replace([float('inf'), float('-inf')], None)
             .alias(f'fwd_ret_{horizon}')])
 
 
@@ -90,6 +162,9 @@ def ohlc_triple_barrier_labels(
     This is a bar-based implementation. OHLC data cannot establish the order of
     an upper and lower barrier touch within the same bar; ``tie_break`` defines
     the convention used for that case.
+
+    Non-positive or non-finite prices and bars where high is below low make
+    an event indeterminate when the invalid value is needed to resolve it.
 
     Parameters
     ----------
@@ -162,7 +237,7 @@ def ohlc_triple_barrier_labels(
         barrier for barrier in (upper_barrier, lower_barrier)
         if isinstance(barrier, str)
     )
-    _validate_df(df, list(dict.fromkeys(required_cols)))
+    _validate_df(df, list(dict.fromkeys(required_cols)), check_all_missing=False)
 
     symbols = _as_numpy_values(df, symbol_col)
     times = _as_numpy_values(df, time_col)
@@ -233,36 +308,6 @@ def _validate_barrier_spec(value: float | str, name: str) -> None:
         raise ValueError(f'{name} must be a positive finite scalar.')
 
 
-def _as_numpy_values(
-        df: pd.DataFrame | pl.DataFrame,
-        column: str,
-) -> np.ndarray:
-    """
-    Return a column as a NumPy array without changing its logical values.
-
-    Parameters
-    ----------
-    df : pd.DataFrame or pl.DataFrame
-        Source DataFrame containing column.
-    column : str
-        Name of the column to extract.
-
-    Returns
-    -------
-    np.ndarray
-        Values from column in input row order.
-
-    Raises
-    ------
-    KeyError
-        If column is not present in df.
-    """
-    if isinstance(df, pd.DataFrame):
-        return df[column].to_numpy()
-
-    return df.get_column(column).to_numpy()
-
-
 def _as_float_values(
         df: pd.DataFrame | pl.DataFrame,
         column: str,
@@ -295,57 +340,6 @@ def _as_float_values(
         return np.asarray(values, dtype=float)
     except (TypeError, ValueError) as error:
         raise TypeError(f'{column} must contain numeric values.') from error
-
-
-def _validate_and_group_times(
-        symbols: np.ndarray,
-        times: np.ndarray,
-        symbol_col: str,
-        time_col: str,
-) -> list[np.ndarray]:
-    """
-    Validate the per-symbol time contract and return input-order indices.
-
-    Parameters
-    ----------
-    symbols : np.ndarray
-        Asset identifiers in input row order.
-    times : np.ndarray
-        Observation times corresponding to symbols.
-    symbol_col : str
-        Symbol-column name used in validation error messages.
-    time_col : str
-        Time-column name used in validation error messages.
-
-    Returns
-    -------
-    list[np.ndarray]
-        One positional-index array per symbol, preserving input symbol order.
-
-    Raises
-    ------
-    ValueError
-        If symbols or times are missing, keys are duplicated, or times are not
-        increasingly ordered within a symbol.
-    """
-    if pd.isna(symbols).any():
-        raise ValueError(f'{symbol_col} must not contain missing values.')
-
-    if pd.isna(times).any():
-        raise ValueError(f'{time_col} must not contain missing values.')
-
-    keys = pd.DataFrame({symbol_col: symbols, time_col: times})
-    if keys.duplicated().any():
-        raise ValueError(f'df must contain unique [{symbol_col}, {time_col}] combinations.')
-
-    codes, _ = pd.factorize(symbols, sort=False)
-    groups = [np.flatnonzero(codes == code) for code in range(codes.max() + 1)]
-
-    for indices in groups:
-        if not pd.Index(times[indices]).is_monotonic_increasing:
-            raise ValueError(f'{time_col} must be increasingly ordered within each symbol.')
-
-    return groups
 
 
 def _barrier_values(
@@ -437,6 +431,9 @@ def _triple_barrier_group_labels(
     ValueError
         If the supplied arrays do not have compatible one-dimensional shapes.
     """
+    arrays = (entry, high, low, close, upper, lower)
+    if any(not isinstance(value, np.ndarray) or value.ndim != 1 or len(value) != len(entry) for value in arrays):
+        raise ValueError('event arrays must have compatible one-dimensional shapes.')
     labels = np.full(len(entry), np.nan, dtype=float)
     n_events = len(entry) - horizon
     if n_events <= 0:
@@ -520,8 +517,13 @@ def _triple_barrier_batch_labels(
     ValueError
         If path arrays or event vectors have incompatible shapes.
     """
+    vectors = (entry, upper_price, lower_price, close_at_horizon, valid_event)
+    if (not isinstance(high, np.ndarray) or not isinstance(low, np.ndarray)
+            or high.ndim != 2 or low.shape != high.shape or high.shape[1] == 0
+            or any(not isinstance(value, np.ndarray) or value.ndim != 1 or len(value) != high.shape[0] for value in vectors)):
+        raise ValueError('path arrays and event vectors must have compatible shapes.')
     labels = np.full(len(entry), np.nan, dtype=float)
-    valid_bars = np.isfinite(high) & np.isfinite(low)
+    valid_bars = np.isfinite(high) & np.isfinite(low) & (high > 0) & (low > 0) & (high >= low)
     upper_touch = high >= upper_price[:, None]
     lower_touch = low <= lower_price[:, None]
     touch = upper_touch | lower_touch
@@ -551,7 +553,7 @@ def _triple_barrier_batch_labels(
     if vertical_label == 'neutral':
         labels[vertical] = 0.0
     else:
-        valid_vertical_close = vertical & np.isfinite(close_at_horizon)
+        valid_vertical_close = vertical & np.isfinite(close_at_horizon) & (close_at_horizon > 0)
         returns = close_at_horizon[valid_vertical_close] / entry[valid_vertical_close] - 1
         labels[valid_vertical_close] = np.sign(returns)
 

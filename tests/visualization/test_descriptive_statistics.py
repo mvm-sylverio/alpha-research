@@ -17,6 +17,98 @@ from alpha_research.visualization import (
 from alpha_research.visualization.descriptive_statistics import _select_plot_values
 
 
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('supplied', [False, True])
+@pytest.mark.parametrize('kind', ['histogram', 'density', 'qq', 'quantiles'])
+def test_distribution_plot_errors_release_only_owned_figures(constructor, supplied, kind, plot_axis):
+    """Should close owned figures after early or late drawing errors and retain caller axes."""
+    import matplotlib.pyplot as plt
+
+    values = constructor({'time': [1, 2, 3], 'symbol': ['A'] * 3, 'value': [1., 2., 4.]})
+    quantiles = constructor({'time': [1, 2], 'q05': [0., 1.], 'q25': [1., 2.],
+                             'median': [2., 3.], 'q75': [3., 4.], 'q95': [4., 5.]})
+    function, frame, kwargs = {
+        'histogram': (plot_distribution_histogram, values, {'color': 'invalid-color'}),
+        'density': (plot_distribution_histogram, values, {'density_color': 'invalid-color'}),
+        'qq': (plot_distribution_qq, values, {'reference_color': 'invalid-color'}),
+        'quantiles': (plot_distribution_quantiles, quantiles, {'color': 'invalid-color'}),
+    }[kind]
+    before = set(plt.get_fignums())
+    try:
+        with pytest.raises(ValueError):
+            function(frame, ax=plot_axis if supplied else None, **kwargs)
+        assert set(plt.get_fignums()) == before
+        assert plt.fignum_exists(plot_axis.figure.number)
+    finally:
+        for number in set(plt.get_fignums()) - before:
+            plt.close(number)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('plotter', [plot_distribution_histogram, plot_distribution_qq, plot_distribution_quantiles])
+def test_distribution_plot_success_retains_owned_figure(constructor, plotter):
+    """Should return a drawable owned figure and leave its lifetime under caller control."""
+    pytest.importorskip('matplotlib')
+    import matplotlib.pyplot as plt
+
+    if plotter is plot_distribution_quantiles:
+        frame = constructor({'time': [1, 2], 'q05': [0., 1.], 'q25': [1., 2.],
+                             'median': [2., 3.], 'q75': [3., 4.], 'q95': [4., 5.]})
+    else:
+        frame = constructor({'time': [1, 2, 3], 'symbol': ['A'] * 3, 'value': [1., 2., 4.]})
+    before = set(plt.get_fignums())
+    axis = plotter(frame)
+    try:
+        assert set(plt.get_fignums()) - before == {axis.figure.number}
+        axis.figure.canvas.draw()
+    finally:
+        plt.close(axis.figure)
+    assert set(plt.get_fignums()) == before
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('missing', [np.inf, -np.inf, np.nan, None])
+def test_distribution_quantile_nonfinite_rows_are_gaps_without_source_mutation(constructor, missing, plot_axis):
+    """Should retain missing dates as gaps in the median and both bands without mutating input."""
+    frame = constructor({'time': [1, 2, 3, 4, 5],
+                         **{name: [missing, float(index), missing, float(index + 4), missing]
+                            for index, name in enumerate(['q05', 'q25', 'median', 'q75', 'q95'])}})
+    original = frame.copy(deep=True) if isinstance(frame, pd.DataFrame) else frame.clone()
+    axis = plot_distribution_quantiles(frame, ax=plot_axis)
+    np.testing.assert_array_equal(axis.lines[0].get_xdata(), [1, 2, 3, 4, 5])
+    np.testing.assert_allclose(axis.lines[0].get_ydata(), [np.nan, 2., np.nan, 6., np.nan], equal_nan=True)
+    # Only dates 2 and 4 have complete quantiles. Neither band may bridge the gap.
+    assert len(axis.collections) == 2
+    for band, expected_ranges in zip(axis.collections, [[(0., 4.), (4., 8.)], [(1., 3.), (5., 7.)]]):
+        paths = band.get_paths()
+        assert len(paths) == 2
+        for path, time, (lower, upper) in zip(paths, [2., 4.], expected_ranges):
+            assert np.isfinite(path.vertices).all()
+            np.testing.assert_array_equal(np.unique(path.vertices[:, 0]), [time])
+            assert path.vertices[:, 1].min() == lower
+            assert path.vertices[:, 1].max() == upper
+    if isinstance(frame, pd.DataFrame):
+        pd.testing.assert_frame_equal(frame, original)
+    else:
+        assert frame.equals(original)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('complete', [False, True])
+def test_distribution_quantiles_reject_partial_or_wholly_nonfinite_data_before_figure_creation(constructor, complete):
+    """Should reject incomplete bands or an entirely unavailable median before allocating a figure."""
+    pytest.importorskip('matplotlib')
+    import matplotlib.pyplot as plt
+
+    frame = constructor({'time': [1, 2],
+                         **{name: [np.inf if complete or name == 'q05' else float(index), np.inf]
+                            for index, name in enumerate(['q05', 'q25', 'median', 'q75', 'q95'])}})
+    before = set(plt.get_fignums())
+    with pytest.raises(ValueError, match='finite median' if complete else 'entirely finite or missing'):
+        plot_distribution_quantiles(frame)
+    assert set(plt.get_fignums()) == before
+
+
 @pytest.fixture
 def distribution_frame_pandas():
     """Create two assets with a separate five-point distribution per asset."""

@@ -1,36 +1,85 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
-import polars as pl
-import pandas as pd
 import numpy as np
-from typing import Literal, Callable
-
+import pandas as pd
+import polars as pl
 from scipy.stats import pearsonr, spearmanr
 
-from alpha_research.evaluation.statistical_tests import newey_west_tstat, fdr_correction
-from alpha_research.evaluation.partial import (
+from alpha_research._utils import (
     _normalize_covariates,
+    _validate_df,
+    _validate_elementwise_features,
+    _validate_grouped_features,
+    _validate_key_values,
+    _validate_same_backend,
+)
+from alpha_research.evaluation.partial import (
+    _validate_min_n,
     _validate_partial_columns,
     partial_correlation,
 )
-from alpha_research._utils import (
-    _is_constant_series,
-    _validate_df,
-    _validate_same_backend,
+from alpha_research.evaluation.statistical_tests import (
+    _newey_west_with_continuity,
+    fdr_correction,
 )
 from alpha_research.features.schema import get_feature_name, join_feature_target_frames
-
 from alpha_research.progress import (
-    ProgressCallback, _progress_iter, _progress_kwargs, _validate_progress_callback,
+    ProgressCallback,
+    _progress_iter,
+    _progress_kwargs,
+    _validate_progress_callback,
 )
 
-__all__ = ['information_coefficient', 'compute_ic', 'partial_information_coefficient',
-           'ICMetrics', 'compute_ic_metrics', 'ic_summary_table',
-           'PartialICSummaryResult', 'partial_ic_summary_table', 'ic_decay',
-           'ic_decay_summary', 'ic_decay_summary_table']
+__all__ = [
+    'ICMetrics',
+    'PartialICSummaryResult',
+    'compute_ic',
+    'compute_ic_metrics',
+    'ic_decay',
+    'ic_decay_summary',
+    'ic_decay_summary_table',
+    'ic_summary_table',
+    'information_coefficient',
+    'partial_ic_summary_table',
+    'partial_information_coefficient',
+]
 
 DataFrame = pd.DataFrame | pl.DataFrame
 TargetFn = Callable[[DataFrame, int], DataFrame]
+
+
+def _validate_ic_keys(df: DataFrame, columns: list[str], date_column: str, symbol_column: str | None):
+    """Validate cross-sectional values and optional asset identity.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Cross-sectional observations.
+    columns : list[str]
+        Numeric signal, target and control columns.
+    date_column : str
+        Cross-sectional date key.
+    symbol_column : str | None
+        Optional asset key whose date combinations must be unique.
+
+    Returns
+    -------
+    None
+        Returns after successful validation.
+
+    Raises
+    ------
+    TypeError, KeyError, ValueError
+        If values, keys, or the input frame are invalid.
+    """
+    _validate_df(df, [date_column, *columns], check_all_missing=False)
+    if symbol_column is not None:
+        _validate_grouped_features(df, columns, symbol_column, date_column)
+    else:
+        _validate_elementwise_features(df, columns)
+        _validate_key_values(df, [date_column], check_infinite=False)
 
 
 def information_coefficient(
@@ -70,18 +119,29 @@ def information_coefficient(
     Constant inputs are detected before calling scipy.
     """
 
+    if corr_method not in ('pearson', 'spearman'):
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
+
     if len(x) != len(y):
         raise ValueError(f'len(x): {len(x)} != len(y): {len(y)}.')
 
-    if _is_constant_series(x) or _is_constant_series(y):
+    x_arr = (x.to_numpy(dtype=float, na_value=np.nan) if isinstance(x, pd.Series)
+             else x.to_numpy().astype(float, copy=False))
+    y_arr = (y.to_numpy(dtype=float, na_value=np.nan) if isinstance(y, pd.Series)
+             else y.to_numpy().astype(float, copy=False))
+    if np.isinf(x_arr).any() or np.isinf(y_arr).any():
+        raise ValueError('inputs must contain only finite or missing values.')
+    complete = ~np.isnan(x_arr) & ~np.isnan(y_arr)
+    x_arr, y_arr = x_arr[complete], y_arr[complete]
+    if len(x_arr) < 2 or np.unique(x_arr).size < 2 or np.unique(y_arr).size < 2:
         return np.nan
 
     if corr_method == 'pearson':
-        return pearsonr(x, y)[0]  # [0] is the correlation coefficient
+        return pearsonr(x_arr, y_arr)[0]  # [0] is the correlation coefficient
     elif corr_method == 'spearman':
-        return spearmanr(x, y)[0]  # [0] is the correlation coefficient
+        return spearmanr(x_arr, y_arr)[0]  # [0] is the correlation coefficient
     else:
-        raise ValueError(f"corr_method must be 'spearman' or 'pearson'.")
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
 
 
 def _compute_ic_pandas(
@@ -97,6 +157,9 @@ def _compute_ic_pandas(
     See compute_ic() for full documentation.
     """
     sub = df[[date_column, feature, target]].dropna()
+
+    if sub.empty:
+        return pd.DataFrame({date_column: df[date_column].iloc[:0], ic_column: pd.Series(dtype='float64')})
 
     ic_by_date = (sub.groupby(date_column)[[feature, target]]
                   .apply(lambda v: information_coefficient(v[feature], v[target], corr_method))
@@ -121,7 +184,7 @@ def _compute_ic_polars(
     Core polars implementation of compute_ic.
     See compute_ic() for full documentation.
     """
-    df_ic = df[[date_column, feature, target]].drop_nulls()
+    df_ic = df[[date_column, feature, target]].drop_nulls().drop_nans([feature, target])
 
     # group by time
     df_ic = (
@@ -132,6 +195,7 @@ def _compute_ic_polars(
             .alias(ic_column)
         )
         .drop_nulls()
+        .filter(pl.col(ic_column).is_finite())
         .sort(date_column)
     )
 
@@ -144,7 +208,9 @@ def compute_ic(
         target: str,
         corr_method: Literal['pearson', 'spearman'] = 'spearman',
         date_column: str = 'time',
-        ic_column: str = 'ic'
+        ic_column: str = 'ic',
+        *,
+        symbol_column: str | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Compute the Information Coefficient (IC) between two columns of a pandas or polars DataFrame
@@ -167,11 +233,15 @@ def compute_ic(
         String name of the date column in df (default = 'time').
     ic_column : str
         String name of the new column in df with the computed ic values.
+    symbol_column : str | None, default None
+        Optional asset key. When supplied, require complete and unique
+        date/asset keys. Without it, asset identity cannot be validated.
 
     Returns
     -------
     pd.DataFrame | pl.DataFrame
         Clean DataFrame with columns [date_column, ic_column] with values sorted by date_column.
+        Missing pairs and dates with undefined correlations are omitted.
 
     Raises
     ------
@@ -180,7 +250,11 @@ def compute_ic(
     TypeError
         If df is not pandas or polars type.
     """
-    _validate_df(df, [date_column, feature, target])
+    if corr_method not in ('pearson', 'spearman'):
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
+    _validate_ic_keys(df, list(dict.fromkeys([feature, target])), date_column, symbol_column)
+    if ic_column == date_column:
+        raise ValueError('ic_column must differ from date_column.')
 
     if isinstance(df, pd.DataFrame):
         return _compute_ic_pandas(df, feature, target, corr_method, date_column, ic_column)
@@ -198,6 +272,7 @@ def partial_information_coefficient(
         ic_column: str = 'partial_ic',
         min_n: int | None = None,
         *,
+        symbol_column: str | None = None,
         on_progress: ProgressCallback | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
@@ -206,6 +281,8 @@ def partial_information_coefficient(
     Each date's feature-target association is conditioned on the same one or
     more covariates. Invalid or undersized cross-sections are omitted, matching
     the established IC behavior for undefined correlations.
+    Missing observations are excluded pairwise with their controls. Infinite
+    selected values and incomplete date keys are rejected.
 
     Parameters
     ----------
@@ -224,6 +301,8 @@ def partial_information_coefficient(
         Name assigned to the partial IC output column.
     min_n : int | None, default None
         Optional additional complete-observation threshold per date.
+    symbol_column : str | None, default None
+        Optional asset key used to validate complete and unique date/asset keys.
 
     on_progress : callable | None, default None
         Optional synchronous observer called with (phase, completed, total).
@@ -252,7 +331,12 @@ def partial_information_coefficient(
     _validate_progress_callback(on_progress)
     normalized_covariates = _normalize_covariates(covariates)
     _validate_partial_columns(feature, target, normalized_covariates)
-    _validate_df(df, [date_column, feature, target, *normalized_covariates])
+    _validate_min_n(min_n)
+    if corr_method not in ('pearson', 'spearman'):
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
+    if ic_column == date_column:
+        raise ValueError('ic_column must differ from date_column.')
+    _validate_ic_keys(df, [feature, target, *normalized_covariates], date_column, symbol_column)
 
     rows = []
     if isinstance(df, pd.DataFrame):
@@ -268,6 +352,8 @@ def partial_information_coefficient(
             if np.isfinite(partial_ic):
                 rows.append({date_column: date, ic_column: partial_ic})
 
+        if not rows:
+            return pd.DataFrame({date_column: df[date_column].iloc[:0], ic_column: pd.Series(dtype='float64')})
         return pd.DataFrame(rows, columns=[date_column, ic_column])
 
     for group in _progress_iter(df.sort(date_column).partition_by(date_column, maintain_order=True), on_progress, 'partial_ic_dates'):
@@ -353,9 +439,15 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
     Notes
     -----
     pct_positive and quantiles are computed on the sign adjusted series.
+    Missing IC values are excluded from scalar metrics but retained in the
+    returned series. Infinite values are rejected.
     """
 
-    ic_arr = ic_series.to_numpy()  # to_numpy unifies treatment of the code below
+    ic_arr = (ic_series.to_numpy(dtype=float, na_value=np.nan)
+              if isinstance(ic_series, pd.Series) else ic_series.to_numpy().astype(float, copy=False))
+    if np.isinf(ic_arr).any():
+        raise ValueError('ic_series must contain only finite or missing values.')
+    ic_arr = ic_arr[~np.isnan(ic_arr)]
 
     # guard for empty or all-nan series
     if len(ic_arr) == 0 or np.all(np.isnan(ic_arr)):
@@ -372,7 +464,7 @@ def compute_ic_metrics(ic_series: pd.Series | pl.Series) -> ICMetrics:
         )
 
     ic_mean = np.mean(ic_arr)
-    ic_std = np.std(ic_arr, ddof=1)  # ddof=1 -> sample
+    ic_std = np.std(ic_arr, ddof=1) if len(ic_arr) > 1 else np.nan  # ddof=1 -> sample
 
     # corrections for floating-point precision that will not return 0 when should
     ic_mean_is_zero = np.isclose(ic_mean, 0, 1e-8)
@@ -408,6 +500,9 @@ class ICSummaryResult:
     ----------
     table : pd.DataFrame | pl.DataFrame
         Summary table with IC metrics and t-stats per feature.
+        ``nw_status`` is ``internal_gap`` when an undefined date separates
+        valid ICs, ``undefined`` when inference is otherwise undefined, and
+        ``ok`` when inference is available.
     ic_frames : dict[str, pd.DataFrame | pl.DataFrame]
         Raw IC time series per feature — {feature_name: df[[time, ic]]}.
         As returned by compute_ic(). Use for rolling analysis and plots.
@@ -424,6 +519,7 @@ def ic_summary_table(
         date_column: str = 'time',
         feature_groups: dict[str, str] | None = None,
         *,
+        symbol_column: str | None = None,
         on_progress: ProgressCallback | None = None,
 ) -> ICSummaryResult:
     """
@@ -434,6 +530,8 @@ def ic_summary_table(
 
     Adopts the Newey West t-statistics because the ic time series usually violate the i.i.d assumption.
     For more explanations, see newey_west_tstat docstring.
+    Dates present in df define the reference sequence. An undefined IC between
+    valid IC dates suppresses inference and sets nw_status to internal_gap.
 
     Parameters
     ----------
@@ -455,6 +553,8 @@ def ic_summary_table(
         multiple features and control of false positives.
         All features are labeled 'ungrouped' if feature_groups is not provided.
         A feature is also labeled 'ungrouped' if its group is not found on feature_groups.
+    symbol_column : str | None, default None
+        Optional asset key used to validate complete and unique date/asset keys.
 
     on_progress : callable | None, default None
         Optional synchronous observer called with (phase, completed, total).
@@ -479,13 +579,18 @@ def ic_summary_table(
     # Guard against empty list
     if not feature_list:
         raise ValueError("feature_list must not be empty.")
+    if len(set(feature_list)) != len(feature_list):
+        raise ValueError('feature_list must not contain duplicates.')
 
     rows = []
     ic_dfs_dict = {}
 
     for feature in _progress_iter(feature_list, on_progress, 'features'):
         # the existence of the column on the df is already checked on compute_ic
-        df_ic = compute_ic(df, feature, target, corr_method, date_column)
+        if symbol_column is None:
+            df_ic = compute_ic(df, feature, target, corr_method, date_column)
+        else:
+            df_ic = compute_ic(df, feature, target, corr_method, date_column, symbol_column=symbol_column)
 
         # Save df_ic to dict for return clause
         ic_dfs_dict[feature] = df_ic
@@ -496,7 +601,7 @@ def ic_summary_table(
         metrics = compute_ic_metrics(ic_series)  # default option for ic column name
 
         # t stat of the ic
-        nw_test = newey_west_tstat(ic_series)
+        nw_test, nw_status = _newey_west_with_continuity(df, df_ic, date_column, 'ic')
 
         # parsing feature_group of the feature
         if feature_groups is not None:
@@ -517,6 +622,7 @@ def ic_summary_table(
             'quantile75': metrics.quantiles['q75'],
             't_stat': nw_test.t_stat,
             'p_value':nw_test.p_value,
+            'nw_status': nw_status,
             'feature_group': feature_group,
             'n_obs': len(ic_series),
         })
@@ -536,7 +642,7 @@ class PartialICSummaryResult:
     ----------
     table : pd.DataFrame | pl.DataFrame
         Summary table with partial IC metrics and Newey-West statistics per
-        feature.
+        feature. ``nw_status`` reports ok, undefined, or internal_gap.
     partial_ic_frames : dict[str, pd.DataFrame | pl.DataFrame]
         Partial IC time series per feature. Each DataFrame contains the date
         column and the partial IC column.
@@ -555,6 +661,7 @@ def partial_ic_summary_table(
         feature_groups: dict[str, str] | None = None,
         min_n: int | None = None,
         *,
+        symbol_column: str | None = None,
         on_progress: ProgressCallback | None = None,
 ) -> PartialICSummaryResult:
     """
@@ -564,6 +671,8 @@ def partial_ic_summary_table(
     The resulting partial-IC time series is summarized with the established IC
     metrics and Newey-West test for its mean. FDR correction is intentionally
     left to ``fdr_correction()``.
+    Dates present in df define the reference sequence. An undefined partial IC
+    between valid dates suppresses inference and sets nw_status to internal_gap.
 
     Parameters
     ----------
@@ -583,6 +692,8 @@ def partial_ic_summary_table(
         Optional semantic group mapping used as FDR metadata.
     min_n : int | None, default None
         Optional additional complete-observation threshold per cross-section.
+    symbol_column : str | None, default None
+        Optional asset key used to validate complete and unique date/asset keys.
 
     on_progress : callable | None, default None
         Optional synchronous observer called with (phase, completed, total).
@@ -629,12 +740,13 @@ def partial_ic_summary_table(
             corr_method=corr_method,
             date_column=date_column,
             min_n=min_n,
+            symbol_column=symbol_column,
             **_progress_kwargs(on_progress, f'feature/{feature}'),
         )
         partial_ic_frames[feature] = partial_ic_frame
         partial_ic_series = partial_ic_frame['partial_ic']
         metrics = compute_ic_metrics(partial_ic_series)
-        nw_test = newey_west_tstat(partial_ic_series)
+        nw_test, nw_status = _newey_west_with_continuity(df, partial_ic_frame, date_column, 'partial_ic')
         feature_group = (
             feature_groups.get(feature, 'ungrouped')
             if feature_groups is not None
@@ -654,6 +766,7 @@ def partial_ic_summary_table(
             'quantile75': metrics.quantiles['q75'],
             't_stat': nw_test.t_stat,
             'p_value': nw_test.p_value,
+            'nw_status': nw_status,
             'feature_group': feature_group,
             'n_obs': len(partial_ic_series),
             'covariates': ', '.join(normalized_covariates),
@@ -672,6 +785,7 @@ class ICDecayResult:
     ----------
     table : pd.DataFrame | pl.DataFrame
         IC metrics, Newey-West statistics and FDR results for each horizon.
+        ``nw_status`` reports ok, undefined, or internal_gap.
     ic_frames : dict[int, pd.DataFrame | pl.DataFrame]
         Raw IC time series for each horizon:
         {horizon: df[[time, ic]]}.
@@ -768,7 +882,7 @@ def ic_decay(
         DataFrame backends.
     """
     _validate_progress_callback(on_progress)
-    _validate_df(df_feature, [date_column, symbol_column, feature])
+    _validate_df(df_feature, [date_column, symbol_column, feature], check_all_missing=False)
 
     target_frames = _generate_target_frames(
         df_feature=df_feature,
@@ -933,8 +1047,12 @@ def _ic_decay_from_target_frames(
     This helper does not call target_fn. It is shared by ic_decay() and
     ic_decay_summary_table() so that batch evaluation can reuse targets
     generated once per horizon.
+    An undefined IC between valid IC dates suppresses Newey-West inference
+    and is reported as ``nw_status='internal_gap'``.
     """
     _validate_progress_callback(on_progress)
+    if corr_method not in ('pearson', 'spearman'):
+        raise ValueError("corr_method must be 'spearman' or 'pearson'.")
     feature_group = (
         feature_groups.get(feature, 'ungrouped')
         if feature_groups is not None
@@ -944,8 +1062,12 @@ def _ic_decay_from_target_frames(
     rows = []
     ic_frames = {}
 
+    _validate_grouped_features(df_feature, [feature], symbol_column, date_column)
+
     for horizon, target_df in _progress_iter(target_frames.items(), on_progress, 'horizons'):
         target_col = get_feature_name(target_df, date_column, symbol_column)
+
+        _validate_grouped_features(target_df, [target_col], symbol_column, date_column)
 
         joined_df = join_feature_target_frames(
             feature_df=df_feature,
@@ -954,22 +1076,23 @@ def _ic_decay_from_target_frames(
             target_col=target_col,
             time_col=date_column,
             symbol_col=symbol_column,
+            check_all_missing=False,
         )
 
-        df_ic = compute_ic(
-            joined_df,
-            feature=feature,
-            target=target_col,
-            corr_method=corr_method,
-            date_column=date_column,
-        )
+        if len(joined_df):
+            df_ic = compute_ic(joined_df, feature=feature, target=target_col,
+                               corr_method=corr_method, date_column=date_column)
+        elif isinstance(joined_df, pd.DataFrame):
+            df_ic = pd.DataFrame({date_column: joined_df[date_column], 'ic': pd.Series(dtype='float64')})
+        else:
+            df_ic = joined_df.select(date_column).with_columns(pl.lit(None, dtype=pl.Float64).alias('ic'))
 
         ic_frames[horizon] = df_ic
 
         ic_series = df_ic['ic']
 
         metrics = compute_ic_metrics(ic_series)
-        nw_test = newey_west_tstat(ic_series)
+        nw_test, nw_status = _newey_west_with_continuity(df_feature, df_ic, date_column, 'ic')
 
         rows.append({
             'feature': feature,
@@ -989,6 +1112,7 @@ def _ic_decay_from_target_frames(
 
             't_stat': nw_test.t_stat,
             'p_value': nw_test.p_value,
+            'nw_status': nw_status,
 
             'feature_group': feature_group,
 
@@ -1040,7 +1164,7 @@ class DecaySummaryResult:
     auc : float
         Area under the absolute mean IC curve versus horizon.
     """
-    peak_horizon: int
+    peak_horizon: int | None
     peak_abs_ic: float
     halflife_horizon: int | None
     last_significant_horizon: int | None
@@ -1092,6 +1216,13 @@ def ic_decay_summary(
         decay_curve,
         ['horizon', 'mean', 'fdr_rejected'],
     )
+
+    horizon_values = decay_curve['horizon'].to_list()
+    if any(isinstance(h, (bool, np.bool_)) or not isinstance(h, (int, np.integer)) or h <= 0
+           for h in horizon_values):
+        raise ValueError('decay_curve horizons must be positive integers.')
+    if any(not isinstance(value, (bool, np.bool_)) for value in decay_curve['fdr_rejected'].to_list()):
+        raise ValueError('decay_curve fdr_rejected values must be boolean.')
 
     if isinstance(decay_curve, pd.DataFrame):
         curve = decay_curve.sort_values('horizon')
@@ -1293,7 +1424,7 @@ def ic_decay_summary_table(
     if len(set(feature_list)) != len(feature_list):
         raise ValueError("feature_list must not contain duplicates.")
 
-    _validate_df(df_features, [date_column, symbol_column] + feature_list)
+    _validate_df(df_features, [date_column, symbol_column] + feature_list, check_all_missing=False)
 
     target_frames = _generate_target_frames(
         df_feature=df_features,
@@ -1329,7 +1460,10 @@ def ic_decay_summary_table(
             feature = decay_table['feature'][0]
             feature_group = decay_table['feature_group'][0]
 
-        summary = ic_decay_summary(decay_table)
+        if np.isfinite(decay_table['mean'].to_numpy()).any():
+            summary = ic_decay_summary(decay_table)
+        else:
+            summary = DecaySummaryResult(None, np.nan, None, None, np.nan)
 
         decay_results[feature] = decay_result
 

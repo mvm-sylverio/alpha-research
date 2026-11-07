@@ -7,11 +7,13 @@ import polars as pl
 
 from alpha_research._utils import (
     _validate_df,
+    _validate_key_values,
     _validate_positive_integer,
+    _validate_probability,
+    _validate_single_symbol,
     _validate_time_order,
     _validate_unique_keys,
 )
-from alpha_research.evaluation.timeseries import _validate_single_symbol
 from alpha_research.progress import (
     ProgressCallback,
     _progress_iter,
@@ -419,9 +421,8 @@ def feature_target_relationship(
     _validate_unique_keys(df, [time_col, symbol_col], 'df')
 
     pandas_frame = df.copy() if isinstance(df, pd.DataFrame) else df.to_pandas()
-    for key in [time_col, symbol_col] + ([] if group_col is None else [group_col]):
-        if pandas_frame[key].isna().any():
-            raise ValueError(f'{key} must not contain missing values.')
+    keys = [time_col, symbol_col] + ([] if group_col is None else [group_col])
+    _validate_key_values(pandas_frame, keys, check_infinite=False)
     for value_col in [feature, target]:
         if (
                 not pd.api.types.is_numeric_dtype(pandas_frame[value_col])
@@ -596,15 +597,7 @@ def temporal_feature_target_relationship_uncertainty(
         raise TypeError('n_bootstraps must be an integer.')
     if n_bootstraps < 2:
         raise ValueError('n_bootstraps must be at least two.')
-    if (
-            not isinstance(
-                confidence_level,
-                (int, float, np.integer, np.floating),
-            )
-            or isinstance(confidence_level, bool)
-            or not 0 < confidence_level < 1
-    ):
-        raise ValueError('confidence_level must be strictly between 0 and 1.')
+    _validate_probability(confidence_level, 'confidence_level')
 
     pairs = (
         observed.pairs.copy()

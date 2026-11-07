@@ -1,20 +1,76 @@
-from dataclasses import dataclass
-from typing import Literal
-
-import polars as pl
-import pandas as pd
-import numpy as np
-import statsmodels.api as sm
-from statsmodels.tsa.stattools import adfuller
-from statsmodels.stats.multitest import multipletests
-from scipy.stats import norm
 import math
+from collections.abc import Hashable
+from dataclasses import dataclass
+from typing import Literal, cast
 
-from alpha_research._utils import _validate_df
+import numpy as np
+import pandas as pd
+import polars as pl
+import statsmodels.api as sm
+from scipy.stats import norm
+from statsmodels.stats.multitest import multipletests
+from statsmodels.tsa.stattools import adfuller
 
-__all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult', 'fdr_correction',
-           'benjamini_hochberg', 'benjamini_yekutieli', 'WaldTemporalAssociationTestResult',
-           'wald_temporal_association_test']
+from alpha_research._utils import (
+    _has_missing_values,
+    _validate_df,
+    _validate_positive_integer,
+    _validate_probability,
+)
+
+__all__ = [
+    'ADFTestResult',
+    'NWTestResult',
+    'WaldTemporalAssociationTestResult',
+    'adf_test',
+    'benjamini_hochberg',
+    'benjamini_yekutieli',
+    'fdr_correction',
+    'newey_west_tstat',
+    'stationarity_test',
+    'wald_temporal_association_test',
+]
+
+
+def _contiguous_numeric_series(series: pd.Series | pl.Series) -> np.ndarray:
+    """Validate a numeric time series and trim missing endpoints.
+
+    Parameters
+    ----------
+    series : pd.Series | pl.Series
+        Ordered observations whose positions define continuity.
+
+    Returns
+    -------
+    np.ndarray
+        Float observations with missing endpoints removed.
+
+    Raises
+    ------
+    TypeError
+        If the series or its dtype is unsupported.
+    ValueError
+        If observations contain infinity or an internal missing value.
+    """
+    if isinstance(series, pd.Series):
+        if not pd.api.types.is_numeric_dtype(series.dtype) or pd.api.types.is_bool_dtype(series.dtype) or pd.api.types.is_complex_dtype(series.dtype):
+            raise TypeError('series must contain real numeric values.')
+        values = series.to_numpy(dtype=float, na_value=np.nan)
+    elif isinstance(series, pl.Series):
+        if not series.dtype.is_numeric() and series.dtype != pl.Null:
+            raise TypeError('series must contain real numeric values.')
+        values = series.to_numpy().astype(float, copy=False)
+    else:
+        raise TypeError('series must be a Pandas or Polars Series.')
+    if np.isinf(values).any():
+        raise ValueError('series must not contain infinite values.')
+    valid = np.flatnonzero(~np.isnan(values))
+    if not len(valid):
+        return values[:0]
+    values = values[valid[0]:valid[-1] + 1]
+    if np.isnan(values).any():
+        raise ValueError('series must not contain internal missing values.')
+    return values
 
 
 # ------------------------------------------------------
@@ -77,6 +133,8 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
 
     Notes
     -----
+    Missing endpoints are trimmed. Internal missing values and infinities are
+    rejected because compressing the series changes the meaning of HAC lags.
     The null hypothesis is: mean(IC) = 0.
     p-value < 0.05 (5% significance)
         Reject the null hypothesis (mean !=0, result is significant).
@@ -93,10 +151,10 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
     signal is significant.
     """
 
-    ic = ic_series.to_numpy()  # more appropriate for statsmodels
+    ic = _contiguous_numeric_series(ic_series)
 
     # guard for empty or all-nan series
-    if len(ic) == 0 or np.all(np.isnan(ic)):
+    if len(ic) < 2:
         return NWTestResult(t_stat=np.nan, p_value=np.nan)
 
     # Constant IC series has zero uncertainty, making the t-stat undefined for practical purposes
@@ -116,6 +174,63 @@ def newey_west_tstat(ic_series: pd.Series | pl.Series) -> NWTestResult:
         t_stat=float(results.tvalues[0]),
         p_value=float(results.pvalues[0])
     )
+
+
+def _newey_west_with_continuity(reference: pd.DataFrame | pl.DataFrame, observations: pd.DataFrame | pl.DataFrame, date_column: str, value_column: str):
+    """Compute Newey-West inference only for contiguous observed dates.
+
+    Parameters
+    ----------
+    reference : DataFrame
+        Input observations defining the ordered sequence of available dates.
+    observations : DataFrame
+        Finite observations indexed by date.
+    date_column, value_column : str
+        Names of the date and value columns.
+
+    Returns
+    -------
+    tuple[NWTestResult, str]
+        Inference and its status: ok, undefined, or internal_gap.
+
+    Raises
+    ------
+    TypeError
+        If frames use unsupported or different backends, or values are nonnumeric.
+    ValueError
+        If dates are missing, duplicated, or absent from the reference sequence,
+        or if observation values are missing or infinite.
+    KeyError
+        If a selected column is absent.
+    """
+    if not isinstance(reference, (pd.DataFrame, pl.DataFrame)) or not isinstance(observations, type(reference)):
+        raise TypeError('reference and observations must use the same DataFrame backend.')
+    for frame, columns in ((reference, [date_column]), (observations, [date_column, value_column])):
+        missing = [column for column in columns if column not in frame.columns]
+        if missing:
+            raise KeyError(f'missing required columns in DataFrame: {missing}.')
+        dates = frame[date_column]
+        if any(not isinstance(date, Hashable) for date in dates.to_list()):
+            raise TypeError('dates must contain hashable values.')
+        if _has_missing_values(dates):
+            raise ValueError('dates must not contain missing values.')
+    if len(_contiguous_numeric_series(observations[value_column])) != len(observations):
+        raise ValueError('observation values must not contain missing values.')
+    reference_dates = sorted(set(cast(list[Hashable], reference[date_column].to_list())))
+    positions = {date: index for index, date in enumerate(reference_dates)}
+    dates = cast(list[Hashable], observations[date_column].to_list())
+    if len(set(dates)) != len(dates) or any(date not in positions for date in dates):
+        raise ValueError('Observation dates must be unique and present in the reference dates.')
+    indices = sorted(positions[date] for date in dates)
+    if indices and indices[-1] - indices[0] + 1 != len(indices):
+        return NWTestResult(t_stat=np.nan, p_value=np.nan), 'internal_gap'
+    if len(indices) < 2:
+        return NWTestResult(t_stat=np.nan, p_value=np.nan), 'undefined'
+    ordered = (observations.sort_values(date_column) if isinstance(observations, pd.DataFrame)
+               else observations.sort(date_column))
+    result = newey_west_tstat(ordered[value_column])
+    status = 'ok' if np.isfinite(result.t_stat) and np.isfinite(result.p_value) else 'undefined'
+    return result, status
 
 
 # ------------------------------------------------------
@@ -214,13 +329,10 @@ def wald_temporal_association_test(
     A zero bootstrap standard error makes the Wald statistic undefined and is
     therefore rejected.
     """
-    if (
-            not isinstance(confidence_level, (int, float, np.integer, np.floating))
-            or isinstance(confidence_level, bool)
-            or not 0 < confidence_level < 1
-    ):
-        raise ValueError('confidence_level must be strictly between 0 and 1.')
+    _validate_probability(confidence_level, 'confidence_level')
 
+    if any(isinstance(value, (bool, np.bool_)) for value in (observed_association, bootstrap_standard_error, null_value)):
+        raise ValueError('observed_association, bootstrap_standard_error, and null_value must be numeric and non-boolean.')
     try:
         observed, bootstrap_se, null = np.asarray([
             observed_association,
@@ -318,6 +430,8 @@ def adf_test(
 
     Notes
     -----
+    Missing endpoints are trimmed; internal missing values and infinities are
+    rejected to preserve the meaning of successive observations.
     The null hypothesis is that there is a unit root (non-stationary series).
 
     The ADF test is a left-tailed unit root test.
@@ -326,12 +440,13 @@ def adf_test(
     This function always uses the default store=False. Under this configuration, adfuller always return
     t-stat, p-value and used_lags in consistent order.
     """
-    np_series = series.to_numpy()  # more appropriate for statsmodels
-    np_series = np_series[~np.isnan(np_series)]  # clean array
+    _validate_probability(significance_level, 'significance_level')
+    _validate_positive_integer(minimum_observations, 'minimum_observations')
+    np_series = _contiguous_numeric_series(series)
 
     # inital checks - minimum length and constant series
     if len(np_series) < minimum_observations:
-        raise ValueError(f'Series is too short for a valid ADF test: {len(series)} < {minimum_observations}')
+        raise ValueError(f'Series is too short for a valid ADF test: {len(np_series)} < {minimum_observations}')
 
     if np.isclose(np.std(np_series, ddof=1), 0, atol=1e-8):
         return ADFTestResult(t_stat=np.nan, p_value=np.nan, is_stationary=None, used_lags=None)
@@ -371,19 +486,20 @@ def _fdr_correction_pandas(
     Core pandas implementation of fdr_correction.
     See fdr_correction() for full documentation.
     """
-    df = df.copy()  # mutable array in pandas - requires copy.
+    original_index = df.index
+    df = df.reset_index(drop=True).copy()
 
     # Default result for tests with invalid p-values
     df['fdr_rejected'] = False
     df['fdr_corrected_p_value'] = np.nan
 
     # get all group names in df[feature_group_column]
-    groups = np.unique(df[feature_group_column].to_numpy())
+    groups = df[feature_group_column].unique()
 
     for group in groups:
         group_mask = df[feature_group_column] == group
 
-        p_values = np.asarray(df.loc[group_mask, p_value_column], dtype=float)
+        p_values = df.loc[group_mask, p_value_column].to_numpy(dtype=float, na_value=np.nan)
 
         valid_mask = np.isfinite(p_values)
 
@@ -401,6 +517,7 @@ def _fdr_correction_pandas(
         df.loc[valid_indices, 'fdr_rejected'] = rejected  # True = passed fdr correction = signal is significant
         df.loc[valid_indices, 'fdr_corrected_p_value'] = corrected_p_values
 
+    df.index = original_index
     return df
 
 
@@ -422,7 +539,8 @@ def fdr_correction(
 
     Non-finite p-values are excluded from the multiple-testing procedure.
     Those tests receive fdr_rejected=False and
-    fdr_corrected_p_value=nan.
+    fdr_corrected_p_value=nan; False does not indicate a valid non-rejection.
+    Group identifiers must not be missing; finite p-values must lie in [0, 1].
 
     Why is this necessary?
     ----------------------
@@ -468,7 +586,32 @@ def fdr_correction(
     Summary tables should not have different run performance in polars
     and pandas. Therefore, everything is transformed to pandas for code simplicity.
     """
-    _validate_df(df, [p_value_column, feature_group_column])
+    _validate_df(df, [feature_group_column])
+    _validate_df(df, [p_value_column], check_all_missing=False)
+
+    _validate_probability(fdr, 'fdr')
+    if method not in ('bh', 'by'):
+        raise ValueError("method must be 'bh' or 'by'.")
+    groups = df[feature_group_column]
+    if _has_missing_values(groups):
+        raise ValueError('feature groups must not contain missing values.')
+    p_series = df[p_value_column]
+    if isinstance(df, pd.DataFrame):
+        valid_dtype = (pd.api.types.is_numeric_dtype(p_series.dtype)
+                       and not pd.api.types.is_bool_dtype(p_series.dtype)
+                       and not pd.api.types.is_complex_dtype(p_series.dtype)) or p_series.isna().all()
+    else:
+        valid_dtype = p_series.dtype.is_numeric() or p_series.dtype == pl.Null
+    if not valid_dtype:
+        raise ValueError('p-values must be real numeric values.')
+    try:
+        values = (df[p_value_column].to_numpy(dtype=float, na_value=np.nan) if isinstance(df, pd.DataFrame)
+                  else df[p_value_column].to_numpy().astype(float, copy=False))
+    except (TypeError, ValueError) as error:
+        raise ValueError('p-values must be numeric.') from error
+    finite = values[np.isfinite(values)]
+    if ((finite < 0) | (finite > 1)).any():
+        raise ValueError('finite p-values must be between 0 and 1.')
 
     if isinstance(df, pd.DataFrame):
         return _fdr_correction_pandas(df, fdr, method, p_value_column, feature_group_column)

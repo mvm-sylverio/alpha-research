@@ -7,6 +7,7 @@ from scipy.stats import kurtosis, skew
 
 from alpha_research._utils import (
     _validate_df,
+    _validate_key_values,
     _validate_positive_integer,
     _validate_time_order,
     _validate_unique_keys,
@@ -98,15 +99,7 @@ def _prepare_value_frame(
     if is_boolean or (not is_numeric and not all_missing):
         raise TypeError(f'{value_col} must be numeric and non-boolean.')
 
-    for key in (time_col, symbol_col):
-        if isinstance(value_frame, pd.DataFrame):
-            has_missing = value_frame[key].isna().any()
-        else:
-            has_missing = value_frame[key].is_null().any()
-            if value_frame.schema[key].is_float():
-                has_missing = has_missing or value_frame[key].is_nan().any()
-        if has_missing:
-            raise ValueError(f'{key} must not contain missing values.')
+    _validate_key_values(value_frame, [time_col, symbol_col], check_infinite=False)
     _validate_unique_keys(value_frame, [time_col, symbol_col], 'value_frame')
     if isinstance(value_frame, pd.DataFrame):
         return value_frame[[time_col, symbol_col, value_col]].copy(), value_col

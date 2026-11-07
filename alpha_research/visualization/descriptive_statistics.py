@@ -7,6 +7,7 @@ from scipy.stats import gaussian_kde, probplot
 
 from alpha_research._utils import _validate_df, _validate_time_order
 from alpha_research.evaluation.descriptive_statistics import _prepare_value_frame
+from alpha_research.visualization._utils import _close_on_plot_error
 
 __all__ = [
     'plot_distribution_histogram',
@@ -143,23 +144,25 @@ def plot_distribution_histogram(
         raise ImportError(
             'Matplotlib is required for plotting. Install alpha-research[viz].',
         ) from error
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
 
-    ax.hist(values, bins=bins, density=True, color=color, alpha=0.35)
-    if show_density and len(values) >= 2 and np.min(values) != np.max(values):
-        grid = np.linspace(np.min(values), np.max(values), 200)
-        ax.plot(grid, gaussian_kde(values)(grid), color=density_color or color)
-    if show_quantiles:
-        for quantile in ([0.5] if np.min(values) == np.max(values) else [0.05, 0.5, 0.95]):
-            ax.axvline(
-                float(np.quantile(values, quantile)),
-                color=color,
-                linestyle='--' if quantile == 0.5 else ':',
-                linewidth=1.0,
-            )
-    ax.set_xlabel(value_col)
-    ax.set_ylabel('Density')
+    with _close_on_plot_error(ax, created_axis):
+        ax.hist(values, bins=bins, density=True, color=color, alpha=0.35)
+        if show_density and len(values) >= 2 and np.min(values) != np.max(values):
+            grid = np.linspace(np.min(values), np.max(values), 200)
+            ax.plot(grid, gaussian_kde(values)(grid), color=density_color or color)
+        if show_quantiles:
+            for quantile in ([0.5] if np.min(values) == np.max(values) else [0.05, 0.5, 0.95]):
+                ax.axvline(
+                    float(np.quantile(values, quantile)),
+                    color=color,
+                    linestyle='--' if quantile == 0.5 else ':',
+                    linewidth=1.0,
+                )
+        ax.set_xlabel(value_col)
+        ax.set_ylabel('Density')
     return ax
 
 
@@ -224,13 +227,15 @@ def plot_distribution_qq(
         raise ImportError(
             'Matplotlib is required for plotting. Install alpha-research[viz].',
         ) from error
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
 
-    ax.plot(theoretical, observed, '.', color=color)
-    ax.plot(theoretical, slope * theoretical + intercept, '--', color=reference_color or color)
-    ax.set_xlabel('Normal theoretical quantiles')
-    ax.set_ylabel(f'Observed {value_col} quantiles')
+    with _close_on_plot_error(ax, created_axis):
+        ax.plot(theoretical, observed, '.', color=color)
+        ax.plot(theoretical, slope * theoretical + intercept, '--', color=reference_color or color)
+        ax.set_xlabel('Normal theoretical quantiles')
+        ax.set_ylabel(f'Observed {value_col} quantiles')
     return ax
 
 
@@ -273,6 +278,12 @@ def plot_distribution_quantiles(
     ValueError
         If temporal keys are invalid, no finite median exists, or bands are
         inconsistent.
+
+    Notes
+    -----
+    Each quantile row must be entirely finite or unavailable. Null, NaN, and
+    infinite values are treated as missing. Unavailable rows remain gaps in
+    the median and both bands at their original temporal positions.
     """
     columns = [time_col, outer_lower_col, 'q25', 'median', 'q75', outer_upper_col]
     _validate_df(summary_frame, columns, check_all_missing=False)
@@ -285,6 +296,7 @@ def plot_distribution_quantiles(
         )
     except (TypeError, ValueError) as error:
         raise TypeError('quantile columns must be numeric.') from error
+    quantiles = np.where(np.isfinite(quantiles), quantiles, np.nan)
     if not np.isfinite(quantiles[:, 2]).any():
         raise ValueError('summary_frame must contain a finite median.')
     complete = np.isfinite(quantiles).all(axis=1)
@@ -298,14 +310,16 @@ def plot_distribution_quantiles(
         raise ImportError(
             'Matplotlib is required for plotting. Install alpha-research[viz].',
         ) from error
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
 
-    times = summary_frame[time_col].to_numpy()
-    outer_label = f'{outer_lower_col.upper()}–{outer_upper_col.upper()}'
-    ax.fill_between(times, quantiles[:, 0], quantiles[:, 4], color=color, alpha=0.12, label=outer_label)
-    ax.fill_between(times, quantiles[:, 1], quantiles[:, 3], color=color, alpha=0.25, label='Q25–Q75')
-    ax.plot(times, quantiles[:, 2], color=color, label='Median')
-    ax.set_xlabel(time_col)
-    ax.set_ylabel('Value')
+    with _close_on_plot_error(ax, created_axis):
+        times = summary_frame[time_col].to_numpy()
+        outer_label = f'{outer_lower_col.upper()}–{outer_upper_col.upper()}'
+        ax.fill_between(times, quantiles[:, 0], quantiles[:, 4], color=color, alpha=0.12, label=outer_label)
+        ax.fill_between(times, quantiles[:, 1], quantiles[:, 3], color=color, alpha=0.25, label='Q25–Q75')
+        ax.plot(times, quantiles[:, 2], color=color, label='Median')
+        ax.set_xlabel(time_col)
+        ax.set_ylabel('Value')
     return ax

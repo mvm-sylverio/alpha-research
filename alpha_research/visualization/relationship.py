@@ -4,10 +4,12 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from alpha_research._utils import _validate_random_state
 from alpha_research.evaluation.relationship import (
     FeatureTargetRelationshipResult,
     FeatureTargetRelationshipUncertaintyResult,
 )
+from alpha_research.visualization._utils import _close_on_plot_error
 
 __all__ = [
     'plot_feature_target_bins',
@@ -75,11 +77,7 @@ def plot_feature_target_scatter(
             or max_points <= 0
     ):
         raise ValueError('max_points must be a positive integer or None.')
-    if random_state is not None and (
-            not isinstance(random_state, (int, np.integer))
-            or isinstance(random_state, bool)
-    ):
-        raise TypeError('random_state must be an integer or None.')
+    _validate_random_state(random_state)
     if not isinstance(alpha, Real) or isinstance(alpha, bool):
         raise TypeError('alpha must be numeric.')
     if not np.isfinite(float(alpha)) or not 0 <= float(alpha) <= 1:
@@ -99,20 +97,22 @@ def plot_feature_target_scatter(
     )
     if max_points is not None and len(pairs) > max_points:
         pairs = pairs.sample(n=max_points, random_state=random_state)
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
-    ax.scatter(
-        pairs[result.feature].to_numpy(dtype=float),
-        pairs[result.target].to_numpy(dtype=float),
-        color=color,
-        alpha=float(alpha),
-    )
-    ax.axhline(0, color='0.6', linewidth=0.8, linestyle='--')
-    ax.set_xlabel(result.feature)
-    ax.set_ylabel(result.target)
-    ax.set_title(
-        title if title is not None else f'{result.feature} vs {result.target}',
-    )
+    with _close_on_plot_error(ax, created_axis):
+        ax.scatter(
+            pairs[result.feature].to_numpy(dtype=float),
+            pairs[result.target].to_numpy(dtype=float),
+            color=color,
+            alpha=float(alpha),
+        )
+        ax.axhline(0, color='0.6', linewidth=0.8, linestyle='--')
+        ax.set_xlabel(result.feature)
+        ax.set_ylabel(result.target)
+        ax.set_title(
+            title if title is not None else f'{result.feature} vs {result.target}',
+        )
     return ax
 
 
@@ -206,54 +206,56 @@ def plot_feature_target_bins(
     )
     x_col = f'feature_{feature_statistic}'
     y_col = f'target_{target_statistic}'
-    if ax is None:
+    created_axis = ax is None
+    if created_axis:
         _, ax = plt.subplots()
-    ax.plot(
-        summary[x_col].to_numpy(dtype=float),
-        summary[y_col].to_numpy(dtype=float),
-        color=color,
-        marker='o',
-    )
-    if uncertainty is not None:
-        uncertainty_frame = (
-            uncertainty.bin_uncertainty.copy()
-            if isinstance(uncertainty.bin_uncertainty, pd.DataFrame)
-            else uncertainty.bin_uncertainty.to_pandas()
-        )
-        plotted = summary.merge(
-            uncertainty_frame,
-            on='bin',
-            how='left',
-            validate='1:1',
-        )
-        lower = plotted[f'target_{target_statistic}_ci_lower'].to_numpy(dtype=float)
-        upper = plotted[f'target_{target_statistic}_ci_upper'].to_numpy(dtype=float)
-        x_values = plotted[x_col].to_numpy(dtype=float)
-        finite = np.isfinite(lower) & np.isfinite(upper) & np.isfinite(x_values)
-        ax.vlines(
-            x_values[finite],
-            lower[finite],
-            upper[finite],
+    with _close_on_plot_error(ax, created_axis):
+        ax.plot(
+            summary[x_col].to_numpy(dtype=float),
+            summary[y_col].to_numpy(dtype=float),
             color=color,
-            linewidth=1.2,
-            alpha=0.85,
+            marker='o',
         )
-    if show_counts:
-        for _, bin_row in summary.iterrows():
-            ax.annotate(
-                f"n={int(bin_row['n_obs'])}",
-                (float(bin_row[x_col]), float(bin_row[y_col])),
-                xytext=(0, 7),
-                textcoords='offset points',
-                ha='center',
-                fontsize=8,
+        if uncertainty is not None:
+            uncertainty_frame = (
+                uncertainty.bin_uncertainty.copy()
+                if isinstance(uncertainty.bin_uncertainty, pd.DataFrame)
+                else uncertainty.bin_uncertainty.to_pandas()
             )
-    ax.axhline(0, color='0.6', linewidth=0.8, linestyle='--')
-    ax.set_xlabel(f'{result.feature} bin {feature_statistic}')
-    ax.set_ylabel(f'{result.target} bin {target_statistic}')
-    ax.set_title(
-        title
-        if title is not None
-        else f'{result.target} by {result.feature} {result.binning} bin',
-    )
+            plotted = summary.merge(
+                uncertainty_frame,
+                on='bin',
+                how='left',
+                validate='1:1',
+            )
+            lower = plotted[f'target_{target_statistic}_ci_lower'].to_numpy(dtype=float)
+            upper = plotted[f'target_{target_statistic}_ci_upper'].to_numpy(dtype=float)
+            x_values = plotted[x_col].to_numpy(dtype=float)
+            finite = np.isfinite(lower) & np.isfinite(upper) & np.isfinite(x_values)
+            ax.vlines(
+                x_values[finite],
+                lower[finite],
+                upper[finite],
+                color=color,
+                linewidth=1.2,
+                alpha=0.85,
+            )
+        if show_counts:
+            for _, bin_row in summary.iterrows():
+                ax.annotate(
+                    f"n={int(bin_row['n_obs'])}",
+                    (float(bin_row[x_col]), float(bin_row[y_col])),
+                    xytext=(0, 7),
+                    textcoords='offset points',
+                    ha='center',
+                    fontsize=8,
+                )
+        ax.axhline(0, color='0.6', linewidth=0.8, linestyle='--')
+        ax.set_xlabel(f'{result.feature} bin {feature_statistic}')
+        ax.set_ylabel(f'{result.target} bin {target_statistic}')
+        ax.set_title(
+            title
+            if title is not None
+            else f'{result.target} by {result.feature} {result.binning} bin',
+        )
     return ax
