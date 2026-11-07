@@ -1,4 +1,5 @@
 import builtins
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -25,6 +26,52 @@ def relationship_result_pandas():
         'target': np.arange(1, 9, dtype=float) ** 2,
     })
     return feature_target_relationship(frame, 'feature', 'target', n_bins=4)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('supplied', [False, True])
+@pytest.mark.parametrize('plotter', [plot_feature_target_scatter, plot_feature_target_bins])
+@pytest.mark.parametrize('failure', ['color', 'title'])
+def test_relationship_plot_errors_release_only_owned_figures(constructor, supplied, plotter, failure, plot_axis, monkeypatch):
+    """Should close owned relationship figures on early or late errors and preserve caller axes."""
+    import matplotlib.pyplot as plt
+    from matplotlib.axes import Axes
+
+    frame = constructor({'time': [1, 2, 3, 4], 'symbol': ['A'] * 4,
+                         'feature': [1., 2., 3., 4.], 'target': [4., 1., 2., 3.]})
+    result = feature_target_relationship(frame, 'feature', 'target', n_bins=2)
+    kwargs = {'color': 'invalid-color'} if failure == 'color' else {}
+    if failure == 'title':
+        monkeypatch.setattr(Axes, 'set_title', Mock(side_effect=RuntimeError('title failed')))
+    before = set(plt.get_fignums())
+    try:
+        with pytest.raises(ValueError if failure == 'color' else RuntimeError):
+            plotter(result, ax=plot_axis if supplied else None, **kwargs)
+        assert set(plt.get_fignums()) == before
+        assert plt.fignum_exists(plot_axis.figure.number)
+    finally:
+        for number in set(plt.get_fignums()) - before:
+            plt.close(number)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('plotter', [plot_feature_target_scatter, plot_feature_target_bins])
+def test_relationship_plot_success_retains_owned_figure(constructor, plotter):
+    """Should retain the successful relationship figure until the caller closes it."""
+    pytest.importorskip('matplotlib')
+    import matplotlib.pyplot as plt
+
+    frame = constructor({'time': [1, 2, 3, 4], 'symbol': ['A'] * 4,
+                         'feature': [1., 2., 3., 4.], 'target': [4., 1., 2., 3.]})
+    result = feature_target_relationship(frame, 'feature', 'target', n_bins=2)
+    before = set(plt.get_fignums())
+    axis = plotter(result)
+    try:
+        assert set(plt.get_fignums()) - before == {axis.figure.number}
+        axis.figure.canvas.draw()
+    finally:
+        plt.close(axis.figure)
+    assert set(plt.get_fignums()) == before
 
 
 @pytest.mark.parametrize('backend', ['pandas', 'polars'])
