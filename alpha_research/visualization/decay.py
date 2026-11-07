@@ -6,6 +6,11 @@ import pandas as pd
 import polars as pl
 
 from alpha_research._utils import _validate_df
+from alpha_research.visualization._utils import (
+    _plot_decisions,
+    _plot_numeric_values,
+    _valid_plot_intervals,
+)
 
 __all__ = ['plot_decay_curves']
 
@@ -109,15 +114,12 @@ def plot_decay_curves(
             decay_table
             if isinstance(decay_table, pd.DataFrame)
             else decay_table.to_pandas()
-        ).sort_values(horizon_col)
-
-        try:
-            horizons = pandas_table[horizon_col].to_numpy(dtype=float)
-            values = pandas_table[value_col].to_numpy(dtype=float)
-        except (TypeError, ValueError) as error:
-            raise ValueError(
-                f'{horizon_col} and {value_col} must contain numeric values.',
-            ) from error
+        )
+        horizons = _plot_numeric_values(pandas_table[horizon_col], horizon_col)
+        order = np.argsort(horizons, kind='stable')
+        pandas_table = pandas_table.iloc[order]
+        horizons = horizons[order]
+        values = _plot_numeric_values(pandas_table[value_col], value_col)
 
         if len(np.unique(horizons)) != len(horizons):
             raise ValueError('each decay table must contain one row per horizon.')
@@ -131,24 +133,9 @@ def plot_decay_curves(
             )
 
         if ci_lower_col is not None:
-            try:
-                ci_lower = pandas_table[ci_lower_col].to_numpy(dtype=float)
-                ci_upper = pandas_table[ci_upper_col].to_numpy(dtype=float)
-            except (TypeError, ValueError) as error:
-                raise ValueError('confidence-limit columns must contain numeric values.') from error
-
-            finite_limits = np.isfinite(ci_lower) & np.isfinite(ci_upper)
-            if (ci_lower[finite_limits] > ci_upper[finite_limits]).any():
-                raise ValueError('ci_lower_col must not exceed ci_upper_col.')
-
-            finite_intervals = finite_limits & np.isfinite(values)
-            if (
-                    (ci_lower[finite_intervals] > values[finite_intervals]).any()
-                    or (ci_upper[finite_intervals] < values[finite_intervals]).any()
-            ):
-                raise ValueError(
-                    'confidence limits must contain the plotted values.',
-                )
+            ci_lower = _plot_numeric_values(pandas_table[ci_lower_col], ci_lower_col)
+            ci_upper = _plot_numeric_values(pandas_table[ci_upper_col], ci_upper_col)
+            _valid_plot_intervals(values, ci_lower, ci_upper, contain_estimate=True)
         else:
             ci_lower = None
             ci_upper = None
@@ -156,9 +143,7 @@ def plot_decay_curves(
         if significance_col is None:
             significant = None
         else:
-            significant = pandas_table[significance_col].fillna(False).to_numpy(
-                dtype=bool,
-            )
+            significant = _plot_decisions(pandas_table[significance_col], significance_col)
 
         prepared_curves.append((
             str(label),

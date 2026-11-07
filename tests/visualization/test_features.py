@@ -11,6 +11,84 @@ from alpha_research.visualization import (
 )
 
 
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_cross_sectional_plot_uses_independent_sorted_quantiles(constructor, plot_axis):
+    """Should draw per-date medians and linearly interpolated quartiles from finite assets."""
+    frame = constructor({'time': [2, 1, 2, 1, 1, 1], 'symbol': ['A', 'A', 'B', 'B', 'C', 'D'],
+                         'value': [8., 0., 12., 4., np.inf, None]})
+    original = frame.copy(deep=True) if isinstance(frame, pd.DataFrame) else frame.clone()
+    result = plot_cross_sectional_value_summary(frame, ax=plot_axis)
+    # Two valid assets per date give quartiles one quarter along each pair.
+    np.testing.assert_array_equal(result.lines[0].get_xdata(), [1, 2])
+    np.testing.assert_allclose(result.lines[0].get_ydata(), [2., 10.])
+    vertices = result.collections[0].get_paths()[0].vertices
+    for x, low, high in [(1, 1., 3.), (2, 9., 11.)]:
+        ys = vertices[vertices[:, 0] == x, 1]
+        assert (ys.min(), ys.max()) == pytest.approx((low, high))
+    if isinstance(frame, pd.DataFrame):
+        pd.testing.assert_frame_equal(frame, original)
+    else:
+        assert frame.equals(original)
+
+
+@pytest.mark.parametrize('function', [plot_time_series_value, plot_cross_sectional_value_summary])
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+@pytest.mark.parametrize('invalid', ['duplicate', 'missing_time', 'missing_symbol', 'infinite_time'])
+def test_value_plots_reject_invalid_observation_identity(function, constructor, invalid, plot_axis):
+    """Should reject invalid observation keys before plotting or cross-sectional aggregation."""
+    data = {'time': [1., 2.], 'symbol': ['A', 'A'], 'value': [1., 2.]}
+    if invalid == 'duplicate':
+        data['time'] = [1., 1.]
+    elif invalid == 'missing_time':
+        data['time'][1] = np.nan
+    elif invalid == 'missing_symbol':
+        data['symbol'][1] = None
+    else:
+        data['time'][1] = np.inf
+    with pytest.raises(ValueError):
+        function(constructor(data), ax=plot_axis)
+    assert not plot_axis.lines and not plot_axis.collections
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_time_series_plot_validates_order_and_preserves_finite_gaps(constructor, plot_axis):
+    """Should preserve chronological coordinates and mark missing or infinite values as gaps."""
+    frame = constructor({'time': [1, 2, 3, 4], 'symbol': ['A'] * 4, 'value': [1., np.inf, None, 4.]})
+    result = plot_time_series_value(frame, ax=plot_axis)
+    np.testing.assert_array_equal(result.lines[0].get_xdata(), [1, 2, 3, 4])
+    np.testing.assert_allclose(result.lines[0].get_ydata(), [1., np.nan, np.nan, 4.], equal_nan=True)
+    reversed_frame = frame.iloc[::-1] if isinstance(frame, pd.DataFrame) else frame.reverse()
+    with pytest.raises(ValueError, match='increasingly ordered'):
+        plot_time_series_value(reversed_frame, ax=plot_axis)
+
+
+@pytest.mark.parametrize('function', [plot_time_series_value, plot_cross_sectional_value_summary])
+def test_value_plots_reject_text_instead_of_dropping_it(function, plot_axis):
+    """Should fail on invalid values even when another value is drawable."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'value': ['1', 'invalid']})
+    with pytest.raises(ValueError, match='numeric'):
+        function(frame, ax=plot_axis)
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_time_series_plot_preserves_timezone_coordinates(constructor, plot_axis):
+    """Should display the same instants when the selected time column carries a timezone."""
+    dates = pd.date_range('1970-01-02', periods=2, freq='D', tz='UTC').tz_convert('America/New_York')
+    result = plot_time_series_value(constructor({'time': dates, 'symbol': ['A', 'A'], 'value': [1., 2.]}), ax=plot_axis)
+    assert list(result.lines[0].get_xdata()) == list(dates)
+    # Both instants are exact day offsets from Matplotlib's default Unix epoch.
+    np.testing.assert_allclose(result.lines[0].get_xdata(orig=False), [1., 2.])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_cross_sectional_plot_keeps_empty_dates_as_gaps(constructor, plot_axis):
+    """Should retain dates with no finite assets rather than connecting across an omitted date."""
+    frame = constructor({'time': [1, 2, 3], 'symbol': ['A'] * 3, 'value': [1., np.inf, 3.]})
+    result = plot_cross_sectional_value_summary(frame, ax=plot_axis)
+    np.testing.assert_array_equal(result.lines[0].get_xdata(), [1, 2, 3])
+    np.testing.assert_allclose(result.lines[0].get_ydata(), [1., np.nan, 3.], equal_nan=True)
+
+
 # ------------------------------------------------------
 # fixtures
 # ------------------------------------------------------

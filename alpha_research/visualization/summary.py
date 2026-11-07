@@ -5,6 +5,12 @@ import pandas as pd
 import polars as pl
 
 from alpha_research._utils import _validate_df, _validate_df_type
+from alpha_research.visualization._utils import (
+    _close_on_plot_error,
+    _plot_decisions,
+    _plot_numeric_values,
+    _valid_plot_intervals,
+)
 
 __all__ = [
     'plot_ic_summary',
@@ -46,7 +52,7 @@ def _validate_ranking_arguments(
         If ``top_n`` is less than one or ``sort_by`` is unsupported.
     """
     if top_n is not None:
-        if not isinstance(top_n, (int, np.integer)) or isinstance(top_n, bool):
+        if not isinstance(top_n, (int, np.integer)) or isinstance(top_n, (bool, np.timedelta64)):
             raise TypeError('top_n must be a positive integer or None.')
         if top_n < 1:
             raise ValueError('top_n must be a positive integer or None.')
@@ -125,6 +131,9 @@ def _prepare_ranked_summary(
 
     Non-finite estimates are excluded. The returned Pandas DataFrame is a
     plotting-only copy, so neither the input table nor its backend is changed.
+    Feature names must be unique non-empty strings. Decisions must be boolean
+    or missing. Finite centered intervals must contain their estimates;
+    incomplete or non-finite intervals are omitted while retaining the point.
 
     Parameters
     ----------
@@ -155,7 +164,8 @@ def _prepare_ranked_summary(
         If a selected required column is absent.
     ValueError
         If the ranking arguments are invalid, only one interval-bound column
-        is supplied, or no finite estimate is available.
+        is supplied, feature labels or decisions are invalid, finite interval
+        geometry is invalid, or no finite estimate is available.
     """
     _validate_ranking_arguments(top_n, sort_by, significance_col)
     if (ci_lower_col is None) != (ci_upper_col is None):
@@ -177,27 +187,26 @@ def _prepare_ranked_summary(
         if isinstance(summary_table, pd.DataFrame)
         else summary_table.select(selected_columns).to_pandas()
     )
-    pandas_table[value_col] = pd.to_numeric(pandas_table[value_col], errors='coerce')
+    labels = pandas_table[feature_col].to_list()
+    if any(not isinstance(label, str) or not label.strip() for label in labels):
+        raise ValueError(f'{feature_col} must contain non-empty feature names.')
+    if len(set(labels)) != len(labels):
+        raise ValueError(f'{feature_col} must contain unique feature names.')
+    pandas_table[value_col] = _plot_numeric_values(pandas_table[value_col], value_col)
+    if significance_col is not None:
+        pandas_table[significance_col] = _plot_decisions(pandas_table[significance_col], significance_col)
+    if ci_lower_col is not None:
+        pandas_table[ci_lower_col] = _plot_numeric_values(pandas_table[ci_lower_col], ci_lower_col)
+        pandas_table[ci_upper_col] = _plot_numeric_values(pandas_table[ci_upper_col], ci_upper_col)
+        _valid_plot_intervals(
+            pandas_table[value_col].to_numpy(), pandas_table[ci_lower_col].to_numpy(),
+            pandas_table[ci_upper_col].to_numpy(), contain_estimate=True,
+        )
     pandas_table = pandas_table.loc[np.isfinite(pandas_table[value_col])].copy()
 
     if pandas_table.empty:
         raise ValueError(
             f'summary_table must contain at least one finite {value_col} value.',
-        )
-
-    if ci_lower_col is not None:
-        pandas_table[ci_lower_col] = pd.to_numeric(
-            pandas_table[ci_lower_col],
-            errors='coerce',
-        )
-    if ci_upper_col is not None:
-        pandas_table[ci_upper_col] = pd.to_numeric(
-            pandas_table[ci_upper_col],
-            errors='coerce',
-        )
-    if significance_col is not None:
-        pandas_table[significance_col] = (
-            pandas_table[significance_col].fillna(False).astype(bool)
         )
 
     sort_values = (
@@ -310,7 +319,12 @@ def _plot_ranked_estimates(
     _validate_df(ranked_table, required_columns, check_all_missing=False)
 
     y_positions = np.arange(len(ranked_table))
-    values = ranked_table[value_col].to_numpy(dtype=float)
+    values = _plot_numeric_values(ranked_table[value_col], value_col)
+    decisions = None if significance_col is None else _plot_decisions(ranked_table[significance_col], significance_col)
+    if ci_lower_col is not None:
+        lower = _plot_numeric_values(ranked_table[ci_lower_col], ci_lower_col)
+        upper = _plot_numeric_values(ranked_table[ci_upper_col], ci_upper_col)
+        valid_intervals = _valid_plot_intervals(values, lower, upper, contain_estimate=True)
 
     if significance_col is None:
         groups = [(None, color, None)]
@@ -325,7 +339,7 @@ def _plot_ranked_estimates(
         mask = (
             np.ones(len(ranked_table), dtype=bool)
             if decision is None
-            else ranked_table[significance_col].to_numpy(dtype=bool) == decision
+            else decisions == decision
         )
         if not mask.any():
             continue
@@ -340,15 +354,7 @@ def _plot_ranked_estimates(
             )
             continue
 
-        lower = ranked_table[ci_lower_col].to_numpy(dtype=float)
-        upper = ranked_table[ci_upper_col].to_numpy(dtype=float)
-        has_interval = (
-            mask
-            & np.isfinite(lower)
-            & np.isfinite(upper)
-            & (lower <= values)
-            & (values <= upper)
-        )
+        has_interval = mask & valid_intervals
         if has_interval.any():
             ax.errorbar(
                 values[has_interval],
@@ -378,7 +384,7 @@ def _plot_ranked_estimates(
     ax.axvline(0.0, color='black', linewidth=1.0, linestyle='--', zorder=1)
     ax.set_yticks(y_positions)
     ax.set_yticklabels(ranked_table[feature_col].astype(str).to_list())
-    ax.invert_yaxis()
+    ax.yaxis.set_inverted(True)
     ax.grid(axis='x', alpha=0.25)
     ax.set_axisbelow(True)
 
@@ -410,7 +416,7 @@ def _create_axis(ax: Any, n_features: int) -> tuple[Any, bool]:
     ValueError
         If ``n_features`` is not a positive integer.
     """
-    if not isinstance(n_features, (int, np.integer)) or isinstance(n_features, bool):
+    if not isinstance(n_features, (int, np.integer)) or isinstance(n_features, (bool, np.timedelta64)):
         raise ValueError('n_features must be a positive integer.')
     if n_features < 1:
         raise ValueError('n_features must be a positive integer.')
@@ -473,19 +479,16 @@ def _resolve_covariates_label(
         return covariates_label
 
     _validate_df(summary_table, [covariates_col], check_all_missing=False)
-    values = (
-        summary_table[covariates_col].dropna().astype(str).unique().tolist()
-        if isinstance(summary_table, pd.DataFrame)
-        else summary_table[covariates_col].drop_nulls().cast(pl.String).unique().to_list()
-    )
-    if not values:
+    raw_values = summary_table[covariates_col].to_list()
+    if any(not isinstance(value, str) or not value.strip() for value in raw_values):
         raise ValueError(f'{covariates_col} must contain a covariate specification.')
+    values = set(raw_values)
     if len(values) != 1:
         raise ValueError(
             f'{covariates_col} must contain one shared covariate specification.',
         )
 
-    return values[0]
+    return next(iter(values))
 
 
 def _add_covariates_note(
@@ -608,21 +611,22 @@ def plot_ic_summary(
         sort_by=sort_by,
     )
     ax, created_axis = _create_axis(ax, len(ranked_table))
-    _plot_ranked_estimates(
-        ranked_table,
-        feature_col=feature_col,
-        value_col=value_col,
-        significance_col=resolved_significance_col,
-        ax=ax,
-        color=color,
-        non_significant_color=non_significant_color,
-    )
-    ax.set_xlabel('Mean information coefficient')
-    ax.set_ylabel('Feature')
-    if title is not None:
-        ax.set_title(title)
-    if created_axis:
-        ax.figure.tight_layout()
+    with _close_on_plot_error(ax, created_axis):
+        _plot_ranked_estimates(
+            ranked_table,
+            feature_col=feature_col,
+            value_col=value_col,
+            significance_col=resolved_significance_col,
+            ax=ax,
+            color=color,
+            non_significant_color=non_significant_color,
+        )
+        ax.set_xlabel('Mean information coefficient')
+        ax.set_ylabel('Feature')
+        if title is not None:
+            ax.set_title(title)
+        if created_axis:
+            ax.figure.tight_layout()
 
     return ax
 
@@ -698,25 +702,26 @@ def plot_temporal_association_summary(
         ci_upper_col=ci_upper_col,
     )
     ax, created_axis = _create_axis(ax, len(ranked_table))
-    _plot_ranked_estimates(
-        ranked_table,
-        feature_col=feature_col,
-        value_col=value_col,
-        significance_col=resolved_significance_col,
-        ax=ax,
-        color=color,
-        non_significant_color=non_significant_color,
-        ci_lower_col=ci_lower_col,
-        ci_upper_col=ci_upper_col,
-    )
-    ax.set_xlabel('Temporal association')
-    ax.set_ylabel('Feature')
-    if title is not None:
-        ax.set_title(title)
-    if ax.get_legend() is not None:
-        ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
-    if created_axis:
-        ax.figure.tight_layout()
+    with _close_on_plot_error(ax, created_axis):
+        _plot_ranked_estimates(
+            ranked_table,
+            feature_col=feature_col,
+            value_col=value_col,
+            significance_col=resolved_significance_col,
+            ax=ax,
+            color=color,
+            non_significant_color=non_significant_color,
+            ci_lower_col=ci_lower_col,
+            ci_upper_col=ci_upper_col,
+        )
+        ax.set_xlabel('Temporal association')
+        ax.set_ylabel('Feature')
+        if title is not None:
+            ax.set_title(title)
+        if ax.get_legend() is not None:
+            ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), frameon=False)
+        if created_axis:
+            ax.figure.tight_layout()
 
     return ax
 
@@ -790,10 +795,11 @@ def plot_partial_ic_summary(
         non_significant_color=non_significant_color,
         title=title,
     )
-    ax.set_xlabel('Mean partial information coefficient')
-    _add_covariates_note(ax, resolved_covariates_label, title)
-    if created_axis:
-        ax.figure.tight_layout()
+    with _close_on_plot_error(ax, created_axis):
+        ax.set_xlabel('Mean partial information coefficient')
+        _add_covariates_note(ax, resolved_covariates_label, title)
+        if created_axis:
+            ax.figure.tight_layout()
 
     return ax
 
@@ -873,9 +879,10 @@ def plot_partial_temporal_association_summary(
         non_significant_color=non_significant_color,
         title=title,
     )
-    ax.set_xlabel('Partial temporal association')
-    _add_covariates_note(ax, resolved_covariates_label, title)
-    if created_axis:
-        ax.figure.tight_layout()
+    with _close_on_plot_error(ax, created_axis):
+        ax.set_xlabel('Partial temporal association')
+        _add_covariates_note(ax, resolved_covariates_label, title)
+        if created_axis:
+            ax.figure.tight_layout()
 
     return ax
