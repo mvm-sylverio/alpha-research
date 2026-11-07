@@ -5,11 +5,9 @@ import polars as pl
 
 from alpha_research.features.targets import (
     _as_float_values,
-    _as_numpy_values,
     _barrier_values,
     _triple_barrier_batch_labels,
     _triple_barrier_group_labels,
-    _validate_and_group_times,
     _validate_barrier_spec,
     fwd_returns,
     ohlc_triple_barrier_labels,
@@ -366,15 +364,6 @@ def test_validate_barrier_spec_rejects_invalid_types(barrier):
         _validate_barrier_spec(barrier, 'barrier')
 
 
-@pytest.mark.parametrize('backend', ['pandas', 'polars'])
-def test_as_numpy_values_preserves_the_selected_column(backend):
-    """Raw extraction should preserve values for both supported backends."""
-    pandas_df = pd.DataFrame({'value': [1, 2, 3]})
-    df = pandas_df if backend == 'pandas' else pl.from_pandas(pandas_df)
-
-    np.testing.assert_array_equal(_as_numpy_values(df, 'value'), [1, 2, 3])
-
-
 def test_as_float_values_converts_numeric_values_and_rejects_text():
     """Numeric extraction should yield floats and fail clearly for text columns."""
     numeric = pd.DataFrame({'value': [1, None, 3]})
@@ -385,33 +374,6 @@ def test_as_float_values_converts_numeric_values_and_rejects_text():
     )
     with pytest.raises(TypeError, match='value'):
         _as_float_values(text, 'value')
-
-
-def test_validate_and_group_times_preserves_interleaved_symbol_order():
-    """Grouping should retain each symbol's input positions after validation."""
-    groups = _validate_and_group_times(
-        symbols=np.array(['AAPL', 'MSFT', 'AAPL', 'MSFT']),
-        times=np.array([1, 1, 2, 2]),
-        symbol_col='symbol',
-        time_col='time',
-    )
-
-    assert [group.tolist() for group in groups] == [[0, 2], [1, 3]]
-
-
-@pytest.mark.parametrize(
-    ('symbols', 'times', 'message'),
-    [
-        (np.array(['AAPL', None]), np.array([1, 2]), 'symbol'),
-        (np.array(['AAPL', 'AAPL']), np.array([1, np.nan]), 'time'),
-        (np.array(['AAPL', 'AAPL']), np.array([1, 1]), 'unique'),
-        (np.array(['AAPL', 'AAPL']), np.array([2, 1]), 'increasingly'),
-    ],
-)
-def test_validate_and_group_times_rejects_invalid_time_keys(symbols, times, message):
-    """Time keys should be complete, unique, and ordered within each symbol."""
-    with pytest.raises(ValueError, match=message):
-        _validate_and_group_times(symbols, times, 'symbol', 'time')
 
 
 def test_barrier_values_resolves_scalar_and_column_distances():

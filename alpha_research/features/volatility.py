@@ -2,10 +2,15 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from alpha_research._utils import _validate_df, _validate_positive_integer
+from alpha_research._utils import (
+    _as_numpy_values,
+    _asset_positions,
+    _validate_and_group_times,
+    _validate_df,
+    _validate_positive_integer,
+)
 from alpha_research.features.returns import log_returns
 from alpha_research.features.schema import get_feature_name
-from alpha_research.features.targets import _as_numpy_values, _validate_and_group_times
 
 __all__ = [
     'realized_volatility',
@@ -100,29 +105,6 @@ def _format_annualization_factor(annualization_factor: int | float) -> str:
         return str(int(factor))
 
     return str(factor).replace('.', '_')
-
-
-def _asset_positions(symbols: list[object]) -> list[list[int]]:
-    """
-    Return input-row positions grouped by symbol while preserving row order.
-
-    Parameters
-    ----------
-    symbols : list[object]
-        Asset identifier values in input-row order.
-
-    Returns
-    -------
-    list[list[int]]
-        One list of row positions for each distinct symbol. Positions within
-        every asset list retain their original temporal order.
-    """
-    positions_by_symbol: dict[object, list[int]] = {}
-
-    for position, symbol in enumerate(symbols):
-        positions_by_symbol.setdefault(symbol, []).append(position)
-
-    return list(positions_by_symbol.values())
 
 
 def _true_range_by_symbol(

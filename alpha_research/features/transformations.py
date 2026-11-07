@@ -11,10 +11,13 @@ import pandas as pd
 import polars as pl
 
 from alpha_research._utils import (
-    _validate_df,
+    _polars_feature_values,
+    _validate_and_group_times,
+    _validate_elementwise_features,
     _validate_finite_number,
+    _validate_grouped_features,
+    _validate_output_columns,
     _validate_positive_integer,
-    _validate_unique_keys,
 )
 
 __all__ = [
@@ -32,39 +35,6 @@ __all__ = [
     'signed_log1p',
     'signed_power',
 ]
-
-
-def _normalize_feature_cols(feature_cols: str | list[str]) -> list[str]:
-    """
-    Normalize one or more feature-column names to a non-empty list.
-
-    Parameters
-    ----------
-    feature_cols : str | list[str]
-        One feature-column name or a non-empty list of feature-column names.
-
-    Returns
-    -------
-    list[str]
-        Feature-column names in their original order.
-
-    Raises
-    ------
-    TypeError
-        If feature_cols is neither a string nor a list.
-    ValueError
-        If feature_cols is an empty list.
-    """
-    if isinstance(feature_cols, str):
-        return [feature_cols]
-
-    if not isinstance(feature_cols, list):
-        raise TypeError('feature_cols must be str or list[str].')
-
-    if not feature_cols:
-        raise ValueError('feature_cols must not be an empty list.')
-
-    return feature_cols
 
 
 def _validate_temporal_order_by_symbol(
@@ -94,182 +64,12 @@ def _validate_temporal_order_by_symbol(
     ValueError
         If any asset contains missing, duplicate, or decreasing times.
     """
-    if isinstance(df, pd.DataFrame):
-        asset_frames = (
-            asset_frame
-            for _, asset_frame in df.groupby(symbol_col, sort=False, dropna=False)
-        )
-    else:
-        asset_frames = iter(df.partition_by(symbol_col, maintain_order=True))
-
-    for asset_frame in asset_frames:
-        times = asset_frame[time_col]
-
-        if isinstance(df, pd.DataFrame):
-            has_missing = times.isna().any()
-            has_duplicates = times.duplicated().any()
-            is_ordered = times.is_monotonic_increasing
-        else:
-            has_missing = times.is_null().any()
-            has_duplicates = times.is_duplicated().any()
-            is_ordered = times.is_sorted()
-
-        if has_missing:
-            raise ValueError(f'{time_col} must not contain missing values.')
-
-        if has_duplicates:
-            raise ValueError(
-                f'{time_col} must contain unique values within each {symbol_col}.',
-            )
-
-        if not is_ordered:
-            raise ValueError(
-                f'{time_col} must be increasingly ordered within each {symbol_col}.',
-            )
-
-
-def _validate_elementwise_features(
-        df: pd.DataFrame | pl.DataFrame,
-        feature_cols: str | list[str],
-) -> list[str]:
-    """Validate numeric finite-or-missing inputs for elementwise transforms.
-
-    Parameters
-    ----------
-    df : pd.DataFrame | pl.DataFrame
-        DataFrame containing the requested feature columns.
-    feature_cols : str | list[str]
-        One feature column or a non-empty feature-column list.
-
-    Returns
-    -------
-    list[str]
-        Normalized feature names in caller order.
-
-    Raises
-    ------
-    KeyError
-        If a feature column is absent.
-    TypeError
-        If df or feature_cols has an unsupported type.
-    ValueError
-        If a non-missing feature is non-numeric or contains infinity.
-    """
-    normalized = _normalize_feature_cols(feature_cols)
-    if any(not isinstance(feature, str) or not feature for feature in normalized):
-        raise TypeError('every feature in feature_cols must be a non-empty string.')
-    if len(set(normalized)) != len(normalized):
-        raise ValueError('feature_cols must not contain duplicate names.')
-    if isinstance(df, pd.DataFrame) and not df.columns.is_unique:
-        raise ValueError('DataFrame must not contain duplicate column names.')
-    _validate_df(df, normalized, check_all_missing=False)
-    for feature in normalized:
-        series = df[feature]
-        if isinstance(df, pd.DataFrame):
-            if not series.isna().all() and (
-                    not pd.api.types.is_numeric_dtype(series)
-                    or pd.api.types.is_bool_dtype(series)
-                    or pd.api.types.is_complex_dtype(series)
-            ):
-                raise ValueError(f'{feature} must be real numeric and non-boolean.')
-            if np.isinf(series.dropna().to_numpy(dtype=float)).any():
-                raise ValueError(f'{feature} must contain only finite or missing values.')
-        else:
-            if not series.dtype.is_numeric() and series.dtype != pl.Null:
-                raise ValueError(f'{feature} must be numeric.')
-            non_missing = series.drop_nulls()
-            if non_missing.dtype.is_float() and non_missing.is_infinite().any():
-                raise ValueError(f'{feature} must contain only finite or missing values.')
-    return normalized
-
-
-def _polars_feature_values(df: pl.DataFrame, feature: str) -> pl.Expr:
-    """Normalize missing Polars feature values for calculation.
-
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Source frame.
-    feature : str
-        Selected numeric feature.
-
-    Returns
-    -------
-    pl.Expr
-        Expression converting NaN to null and Null dtype to Float64.
-
-    Raises
-    ------
-    KeyError
-        If the feature is missing.
-    """
-    if feature not in df.columns:
-        raise KeyError(feature)
-    value = pl.col(feature)
-    if df.schema[feature] == pl.Null:
-        value = value.cast(pl.Float64)
-    return value.fill_nan(None)
-
-
-def _validate_grouped_features(df, feature_cols, symbol_col, time_col):
-    """Validate feature values and observation keys for grouped transforms.
-
-    Parameters
-    ----------
-    df : pd.DataFrame | pl.DataFrame
-        Input observations.
-    feature_cols : str | list[str]
-        Feature names to transform.
-    symbol_col, time_col : str
-        Observation key columns.
-
-    Returns
-    -------
-    list[str]
-        Validated feature names in input order.
-
-    Raises
-    ------
-    TypeError, KeyError, ValueError
-        If the input, feature values, or observation keys are invalid.
-    """
-    features = _validate_elementwise_features(df, feature_cols)
-    _validate_df(df, [symbol_col, time_col], check_all_missing=False)
-    for column in (symbol_col, time_col):
-        series = df[column]
-        missing = series.isna().any() if isinstance(df, pd.DataFrame) else series.is_null().any() or (series.dtype.is_float() and series.is_nan().any())
-        if missing:
-            raise ValueError(f'{column} must not contain missing values.')
-    _validate_unique_keys(df, [time_col, symbol_col], 'df')
-    return features
-
-
-def _validate_output_columns(df, features: list[str], suffix: str) -> None:
-    """Reject generated column names that already exist in the input.
-
-    Parameters
-    ----------
-    df : pd.DataFrame | pl.DataFrame
-        Validated input frame.
-    features : list[str]
-        Selected feature names.
-    suffix : str
-        Suffix appended to each feature name.
-
-    Returns
-    -------
-    None
-        Returns None when output names are available.
-
-    Raises
-    ------
-    ValueError
-        If a generated output column is already present or repeated.
-    """
-    outputs = [f'{feature}_{suffix}' for feature in features]
-    collisions = [name for name in outputs if name in df.columns]
-    if collisions or len(outputs) != len(set(outputs)):
-        raise ValueError(f'transformation output columns already exist or repeat: {collisions}.')
+    _validate_and_group_times(
+        df[symbol_col],
+        df[time_col],
+        symbol_col,
+        time_col,
+    )
 
 
 def cross_sectional_rank(

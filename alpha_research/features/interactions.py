@@ -13,15 +13,14 @@ import pandas as pd
 import polars as pl
 
 from alpha_research._utils import (
-    _validate_df,
-    _validate_finite_number,
-    _validate_unique_keys,
-)
-from alpha_research.features.transformations import (
     _normalize_feature_cols,
     _polars_feature_values,
+    _validate_df,
     _validate_elementwise_features,
+    _validate_finite_number,
+    _validate_key_values,
     _validate_output_columns,
+    _validate_unique_keys,
 )
 
 __all__ = [
@@ -86,10 +85,6 @@ def _validate_interaction_inputs(
     they already belong to the same unique observation row.
     """
     features = _normalize_feature_cols(feature_cols)
-    if any(not isinstance(feature, str) or not feature for feature in features):
-        raise TypeError('every feature in feature_cols must be a non-empty string.')
-    if len(set(features)) != len(features):
-        raise ValueError('feature_cols must not contain duplicate names.')
     if not isinstance(other_feature, str) or not other_feature:
         raise TypeError('other_feature must be a non-empty string.')
     if not isinstance(symbol_col, str) or not symbol_col:
@@ -112,16 +107,7 @@ def _validate_interaction_inputs(
     _validate_df(df, required_cols, check_all_missing=False)
     _validate_unique_keys(df, [time_col, symbol_col], 'df')
 
-    for key in [time_col, symbol_col]:
-        series = df[key]
-        if isinstance(df, pd.DataFrame):
-            has_missing = bool(series.isna().any())
-        else:
-            has_missing = bool(series.is_null().any())
-            if series.dtype.is_float():
-                has_missing = has_missing or bool(series.is_nan().any())
-        if has_missing:
-            raise ValueError(f'{key} must not contain missing values.')
+    _validate_key_values(df, [time_col, symbol_col], check_infinite=False)
 
     _validate_elementwise_features(df, [*features, other_feature])
 

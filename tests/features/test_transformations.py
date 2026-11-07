@@ -4,11 +4,6 @@ import polars as pl
 import pytest
 
 from alpha_research.features.transformations import (
-    _normalize_feature_cols,
-    _polars_feature_values,
-    _validate_elementwise_features,
-    _validate_grouped_features,
-    _validate_output_columns,
     _validate_temporal_order_by_symbol,
     absolute,
     clip,
@@ -24,16 +19,6 @@ from alpha_research.features.transformations import (
     signed_log1p,
     signed_power,
 )
-
-
-def test_validate_output_columns_rejects_conflicts():
-    """Should accept unused names and reject existing or repeated outputs."""
-    frame = pd.DataFrame({'x': [1.], 'x_sign': [9.]})
-    assert _validate_output_columns(frame, ['x'], 'abs') is None
-    with pytest.raises(ValueError, match='x_sign'):
-        _validate_output_columns(frame, ['x'], 'sign')
-    with pytest.raises(ValueError, match='repeat'):
-        _validate_output_columns(frame, ['x', 'x'], 'abs')
 
 
 @pytest.mark.parametrize('function,kwargs,suffix', [
@@ -71,15 +56,6 @@ def test_transformation_rejects_output_that_is_another_selected_feature(backend)
         frame = pl.from_pandas(frame)
     with pytest.raises(ValueError, match='x_sign'):
         sign(frame, ['x', 'x_sign'])
-
-
-def test_polars_feature_values_handles_null_dtype_and_missing_column():
-    """Should normalize Null dtype without modifying source or accepting absent columns."""
-    frame = pl.DataFrame({'x': [None, None]})
-    assert frame.select(_polars_feature_values(frame, 'x')).schema['x'] == pl.Float64
-    assert frame.schema['x'] == pl.Null
-    with pytest.raises(KeyError):
-        _polars_feature_values(frame, 'missing')
 
 
 @pytest.mark.parametrize('function,kwargs', [
@@ -169,14 +145,6 @@ def test_grouped_transformations_reject_invalid_keys_and_features(function, kwar
     features = ['x', 'x'] if invalid == 'duplicate_feature' else ['x']
     with pytest.raises(ValueError):
         function(frame, features, **kwargs)
-
-
-def test_validate_grouped_features_contract():
-    """Should validate grouped feature names and keys without rejecting missing values."""
-    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [np.nan, np.nan]})
-    assert _validate_grouped_features(frame, 'x', 'symbol', 'time') == ['x']
-    with pytest.raises(KeyError):
-        _validate_grouped_features(frame, 'x', 'symbol', 'missing')
 
 
 @pytest.mark.parametrize('backend', ['pandas', 'polars'])
@@ -375,22 +343,6 @@ def test_rank_invalid_df_type_raises(multi_asset_features_pandas):
 # ------------------------------------------------------
 # transformation helpers
 # ------------------------------------------------------
-def test_normalize_feature_cols_accepts_string_and_list():
-    """Should normalize a single feature without altering a feature list."""
-    assert _normalize_feature_cols('feature') == ['feature']
-    assert _normalize_feature_cols(['feature_a', 'feature_b']) == ['feature_a', 'feature_b']
-
-
-@pytest.mark.parametrize('feature_cols, exception', [
-    ([], ValueError),
-    (123, TypeError),
-])
-def test_normalize_feature_cols_rejects_invalid_input(feature_cols, exception):
-    """Should validate feature-column input independently of public callers."""
-    with pytest.raises(exception):
-        _normalize_feature_cols(feature_cols)
-
-
 @pytest.mark.parametrize('backend', [pd.DataFrame, pl.DataFrame])
 def test_validate_temporal_order_by_symbol_accepts_ordered_asset_series(backend):
     """Should accept unique increasing times for every asset."""
@@ -722,31 +674,6 @@ def test_elementwise_transformations_support_multiple_features(
     """Should append one independently transformed column per requested feature."""
     result = absolute(elementwise_features_pandas, ['x', 'y'])
     assert {'x_abs', 'y_abs'} <= set(result.columns)
-
-
-@pytest.mark.parametrize(
-    'frame, features, error_type, message',
-    [
-        (pd.DataFrame({'x': [1.0]}), [], ValueError, 'empty'),
-        (pd.DataFrame({'x': [1.0]}), 'missing', KeyError, 'missing required'),
-        (pd.DataFrame({'x': ['a']}), 'x', ValueError, 'numeric'),
-        (pd.DataFrame({'x': [np.inf]}), 'x', ValueError, 'finite'),
-    ],
-)
-def test_validate_elementwise_features_rejects_invalid_inputs(
-        frame,
-        features,
-        error_type,
-        message,
-):
-    """Should enforce the direct helper contract for pointwise inputs."""
-    with pytest.raises(error_type, match=message):
-        _validate_elementwise_features(frame, features)
-
-
-def test_validate_elementwise_features_returns_normalized_names():
-    """Should normalize a valid single feature into a list."""
-    assert _validate_elementwise_features(pd.DataFrame({'x': [1.0]}), 'x') == ['x']
 
 
 @pytest.mark.parametrize(

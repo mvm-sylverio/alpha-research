@@ -4,6 +4,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from alpha_research._utils import _validate_random_state
 from alpha_research.evaluation.relationship import (
     FeatureTargetRelationshipResult,
     FeatureTargetRelationshipUncertaintyResult,
@@ -75,11 +76,7 @@ def plot_feature_target_scatter(
             or max_points <= 0
     ):
         raise ValueError('max_points must be a positive integer or None.')
-    if random_state is not None and (
-            not isinstance(random_state, (int, np.integer))
-            or isinstance(random_state, bool)
-    ):
-        raise TypeError('random_state must be an integer or None.')
+    _validate_random_state(random_state)
     if not isinstance(alpha, Real) or isinstance(alpha, bool):
         raise TypeError('alpha must be numeric.')
     if not np.isfinite(float(alpha)) or not 0 <= float(alpha) <= 1:

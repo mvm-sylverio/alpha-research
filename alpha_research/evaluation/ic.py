@@ -9,17 +9,19 @@ from scipy.stats import pearsonr, spearmanr
 
 from alpha_research.evaluation.statistical_tests import fdr_correction, _newey_west_with_continuity
 from alpha_research.evaluation.partial import (
-    _normalize_covariates,
     _validate_partial_columns,
     _validate_min_n,
     partial_correlation,
 )
 from alpha_research._utils import (
+    _normalize_covariates,
     _validate_df,
+    _validate_elementwise_features,
+    _validate_grouped_features,
+    _validate_key_values,
     _validate_same_backend,
 )
 from alpha_research.features.schema import get_feature_name, join_feature_target_frames
-from alpha_research.features.transformations import _validate_elementwise_features, _validate_grouped_features
 
 from alpha_research.progress import (
     ProgressCallback, _progress_iter, _progress_kwargs, _validate_progress_callback,
@@ -63,12 +65,7 @@ def _validate_ic_keys(df: DataFrame, columns: list[str], date_column: str, symbo
         _validate_grouped_features(df, columns, symbol_column, date_column)
     else:
         _validate_elementwise_features(df, columns)
-        dates = df[date_column]
-        missing = dates.isna().any() if isinstance(df, pd.DataFrame) else (
-            dates.is_null().any() or (dates.dtype.is_float() and dates.is_nan().any())
-        )
-        if missing:
-            raise ValueError(f'{date_column} must not contain missing values.')
+        _validate_key_values(df, [date_column], check_infinite=False)
 
 
 def information_coefficient(

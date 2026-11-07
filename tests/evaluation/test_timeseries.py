@@ -17,7 +17,6 @@ from alpha_research.evaluation.timeseries import (
     _validate_continuity_column,
     _validate_feature_list,
     _validate_rolling_temporal_association_frame,
-    _validate_single_symbol,
     _validate_summary_bootstrap_configuration,
     partial_temporal_association,
     partial_temporal_association_summary_table,
@@ -234,63 +233,6 @@ def rolling_temporal_df_pandas():
 @pytest.fixture
 def rolling_temporal_df_polars(rolling_temporal_df_pandas):
     return pl.from_pandas(rolling_temporal_df_pandas)
-
-
-# ------------------------------------------------------
-# _validate_single_symbol
-# ------------------------------------------------------
-def test_validate_single_symbol_accepts_one_pandas_symbol(temporal_df_pandas):
-    """Should accept a pandas DataFrame containing one non-missing symbol."""
-    _validate_single_symbol(temporal_df_pandas, 'symbol')
-
-
-def test_validate_single_symbol_accepts_one_polars_symbol(temporal_df_polars):
-    """Should accept a Polars DataFrame containing one non-missing symbol."""
-    _validate_single_symbol(temporal_df_polars, 'symbol')
-
-
-def test_validate_single_symbol_rejects_multiple_pandas_symbols(temporal_df_pandas):
-    """Should reject a pandas DataFrame containing multiple symbols."""
-    df = temporal_df_pandas.copy()
-    df.loc[4, 'symbol'] = 'MSFT'
-
-    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
-        _validate_single_symbol(df, 'symbol')
-
-
-def test_validate_single_symbol_rejects_multiple_polars_symbols(temporal_df_polars):
-    """Should reject a Polars DataFrame containing multiple symbols."""
-    df = temporal_df_polars.with_columns(
-        pl.when(pl.int_range(pl.len()) == 4)
-        .then(pl.lit('MSFT'))
-        .otherwise(pl.col('symbol'))
-        .alias('symbol')
-    )
-
-    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
-        _validate_single_symbol(df, 'symbol')
-
-
-def test_validate_single_symbol_rejects_missing_pandas_symbols(temporal_df_pandas):
-    """Should reject a pandas DataFrame containing missing symbols."""
-    df = temporal_df_pandas.copy()
-    df.loc[2, 'symbol'] = None
-
-    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
-        _validate_single_symbol(df, 'symbol')
-
-
-def test_validate_single_symbol_rejects_missing_polars_symbols(temporal_df_polars):
-    """Should reject a Polars DataFrame containing missing symbols."""
-    df = temporal_df_polars.with_columns(
-        pl.when(pl.int_range(pl.len()) == 2)
-        .then(pl.lit(None, dtype=pl.String))
-        .otherwise(pl.col('symbol'))
-        .alias('symbol')
-    )
-
-    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
-        _validate_single_symbol(df, 'symbol')
 
 
 # ------------------------------------------------------

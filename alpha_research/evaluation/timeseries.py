@@ -6,8 +6,12 @@ import pandas as pd
 import polars as pl
 
 from alpha_research._utils import (
-    _validate_positive_integer,
+    _normalize_covariates,
     _validate_df,
+    _validate_positive_integer,
+    _validate_probability,
+    _validate_random_state,
+    _validate_single_symbol,
     _validate_time_order,
 )
 from alpha_research.evaluation.ic import (
@@ -16,7 +20,6 @@ from alpha_research.evaluation.ic import (
     information_coefficient,
 )
 from alpha_research.evaluation.partial import (
-    _normalize_covariates,
     _validate_partial_columns,
     partial_correlation,
 )
@@ -73,27 +76,6 @@ class RollingTemporalAssociationResult:
     """
     rolling_frame: pd.DataFrame | pl.DataFrame
     summary_table: pd.DataFrame | pl.DataFrame
-
-
-def _validate_single_symbol(
-        df: pd.DataFrame | pl.DataFrame,
-        symbol_col: str,
-) -> None:
-    """Validate that a DataFrame represents exactly one non-missing asset."""
-    symbols = df[symbol_col]
-
-    if isinstance(df, pd.DataFrame):
-        has_missing = symbols.isna().any()
-        n_symbols = symbols.nunique(dropna=True)
-    else:
-        has_missing = symbols.is_null().any()
-        n_symbols = symbols.drop_nulls().n_unique()
-
-    if has_missing or n_symbols != 1:
-        raise ValueError(
-            f'{symbol_col} must contain exactly one non-missing symbol for '
-            'temporal association.'
-        )
 
 
 def _select_valid_temporal_pairs(
@@ -385,11 +367,7 @@ def _rolling_random_states(
     if random_state is None:
         return [None] * n_windows
 
-    if (
-            not isinstance(random_state, (int, np.integer))
-            or isinstance(random_state, bool)
-    ):
-        raise TypeError('random_state must be an integer or None.')
+    _validate_random_state(random_state)
 
     seed_sequence = np.random.SeedSequence(int(random_state))
     return [
@@ -474,18 +452,8 @@ def _validate_summary_bootstrap_configuration(
     if n_bootstraps < 2:
         raise ValueError('n_bootstraps must be at least two for Wald inference.')
 
-    if (
-            not isinstance(confidence_level, (int, float, np.integer, np.floating))
-            or isinstance(confidence_level, bool)
-            or not 0 < confidence_level < 1
-    ):
-        raise ValueError('confidence_level must be strictly between 0 and 1.')
-
-    if random_state is not None and (
-            not isinstance(random_state, (int, np.integer))
-            or isinstance(random_state, bool)
-    ):
-        raise TypeError('random_state must be an integer or None.')
+    _validate_probability(confidence_level, 'confidence_level')
+    _validate_random_state(random_state)
 
 
 def _validate_continuity_column(
@@ -928,12 +896,7 @@ def rolling_temporal_association(
     if n_bootstraps < 2:
         raise ValueError('n_bootstraps must be at least two.')
 
-    if (
-            not isinstance(confidence_level, (int, float, np.integer, np.floating))
-            or isinstance(confidence_level, bool)
-            or not 0 < confidence_level < 1
-    ):
-        raise ValueError('confidence_level must be strictly between 0 and 1.')
+    _validate_probability(confidence_level, 'confidence_level')
 
     window_end_positions = list(range(window_size - 1, len(df), window_step))
     window_random_states = _rolling_random_states(

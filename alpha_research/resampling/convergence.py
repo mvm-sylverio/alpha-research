@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from alpha_research._utils import _validate_finite_number, _validate_positive_integer
+from alpha_research._utils import (
+    _validate_finite_number,
+    _validate_positive_integer,
+    _validate_random_state,
+)
 from alpha_research.progress import (
     ProgressCallback,
     _progress_iter,
@@ -206,7 +210,7 @@ def _validate_tolerances(
 
         try:
             numeric_tolerance = _validate_finite_number(tolerance, f'{name} values')
-        except (ValueError, OverflowError) as error:
+        except ValueError as error:
             raise ValueError(f'{name} values must be finite and non-negative.') from error
 
         if numeric_tolerance < 0:
@@ -248,11 +252,7 @@ def _generate_run_random_states(
     if n_runs < 2:
         raise ValueError('n_runs must be at least two to measure dispersion.')
 
-    if random_state is not None and (
-            not isinstance(random_state, (int, np.integer))
-            or isinstance(random_state, bool)
-    ):
-        raise TypeError('random_state must be an integer or None.')
+    _validate_random_state(random_state)
 
     seed_sequence = np.random.SeedSequence(random_state)
     return tuple(
@@ -467,7 +467,7 @@ def _extract_monitored_metrics(
 
         try:
             numeric_value = _validate_finite_number(metric_value, 'metrics_fn values')
-        except (ValueError, OverflowError) as error:
+        except ValueError as error:
             raise ValueError('metrics_fn values must be finite.') from error
 
         extracted_metrics[metric_name] = numeric_value

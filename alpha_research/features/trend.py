@@ -2,10 +2,15 @@ import pandas as pd
 import polars as pl
 import numpy as np
 
-from alpha_research._utils import _validate_df, _validate_positive_integer
-from alpha_research.features.targets import _as_numpy_values, _valid_price_expression, _validate_and_group_times
-from alpha_research.features.volatility import (
+from alpha_research._utils import (
+    _as_numpy_values,
     _asset_positions,
+    _validate_and_group_times,
+    _validate_df,
+    _validate_positive_integer,
+)
+from alpha_research.features.targets import _valid_price_expression
+from alpha_research.features.volatility import (
     _average_true_range_values,
     _feature_result_frame,
     _valid_ohlc_values,

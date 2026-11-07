@@ -6,14 +6,29 @@ import pytest
 # Imports that should not be inspected
 # noinspection PyProtectedMember
 from alpha_research._utils import (
+    _as_numpy_values,
+    _as_real_float,
+    _asset_positions,
+    _has_missing_values,
     _is_all_missing,
     _is_constant_series,
+    _normalize_column_names,
+    _normalize_covariates,
+    _normalize_feature_cols,
+    _polars_feature_values,
     _select_columns,
+    _validate_and_group_times,
     _validate_df,
+    _validate_elementwise_features,
     _validate_finite_number,
+    _validate_grouped_features,
     _validate_key_values,
+    _validate_output_columns,
     _validate_positive_integer,
+    _validate_probability,
+    _validate_random_state,
     _validate_same_backend,
+    _validate_single_symbol,
     _validate_time_order,
     _validate_unique_keys,
 )
@@ -678,3 +693,362 @@ def test_time_key_hardening_reaches_temporal_association(constructor):
                          'x': [1., 2., 3.], 'y': [2., 1., 3.]})
     with pytest.raises(ValueError, match='time must not contain missing values'):
         temporal_association(frame, 'x', 'y')
+
+
+# ------------------------------------------------------
+# Shared validation contracts
+# ------------------------------------------------------
+@pytest.mark.parametrize('constructor', [pd.Series, pl.Series])
+@pytest.mark.parametrize('values, expected', [
+    ([], False), (['A', 'B'], False), ([np.inf, 1.], False),
+    ([1., None], True), ([1., np.nan], True), (['A', None], True),
+])
+def test_has_missing_values_distinguishes_missing_from_infinite(constructor, values, expected):
+    """Should recognize native missing values without classifying infinity as missing."""
+    assert _has_missing_values(constructor(values)) is expected
+
+
+def test_has_missing_values_requires_a_supported_series():
+    """Should reject containers outside the Pandas and Polars series contract."""
+    with pytest.raises(TypeError, match='Unsupported Series type'):
+        _has_missing_values([1, None])
+
+
+@pytest.mark.parametrize('constructor', [pd.DataFrame, pl.DataFrame])
+def test_validate_key_values_can_preserve_a_missing_only_policy(constructor):
+    """Should permit infinities only when explicitly requested and still reject NaN."""
+    _validate_key_values(constructor({'time': [1., np.inf]}), ['time'], check_infinite=False)
+    with pytest.raises(ValueError, match='missing values'):
+        _validate_key_values(constructor({'time': [1., np.nan]}), ['time'], check_infinite=False)
+    with pytest.raises(TypeError, match='check_infinite must be boolean'):
+        _validate_key_values(constructor({'time': [1.]}), ['time'], check_infinite=0)
+
+
+@pytest.mark.parametrize('columns, expected', [('x', ['x']), (['z', 'x'], ['z', 'x'])])
+def test_normalize_column_names_preserves_name_order(columns, expected):
+    """Should preserve the caller's name order when normalizing a container."""
+    assert _normalize_column_names(columns, type_error='invalid names', empty_error='no names') == expected
+
+
+@pytest.mark.parametrize('columns, exception, message', [
+    (('x',), TypeError, 'invalid names'), (None, TypeError, 'invalid names'), ([], ValueError, 'no names'),
+])
+def test_normalize_column_names_preserves_caller_errors(columns, exception, message):
+    """Should report an invalid or empty container with the requested message."""
+    with pytest.raises(exception, match=message):
+        _normalize_column_names(columns, type_error='invalid names', empty_error='no names')
+
+
+@pytest.mark.parametrize('value, expected', [(3, 3.), (np.float32(0.5), 0.5), (np.inf, np.inf), (-np.inf, -np.inf)])
+def test_as_real_float_preserves_real_values(value, expected):
+    """Should convert supported scalars and preserve the sign of infinity."""
+    assert _as_real_float(value, type_error='invalid scalar', overflow_error='float overflow') == expected
+
+
+def test_as_real_float_leaves_nan_for_callers():
+    """Should leave a NaN intact so each caller can apply its missing-value policy."""
+    assert np.isnan(_as_real_float(np.nan, type_error='invalid scalar', overflow_error='float overflow'))
+
+
+@pytest.mark.parametrize('value', [True, np.bool_(False), '1', 1j, None, np.timedelta64(1, 'D')])
+def test_as_real_float_rejects_coercion_of_unsupported_scalars(value):
+    """Should reject numeric-looking non-real values with the caller's error."""
+    with pytest.raises(TypeError, match='invalid scalar'):
+        _as_real_float(value, type_error='invalid scalar', overflow_error='float overflow')
+
+
+@pytest.mark.parametrize('value', [10 ** 400, -(10 ** 400)])
+def test_as_real_float_rejects_unrepresentable_magnitudes(value):
+    """Should distinguish overflow of a finite scalar from an input infinity."""
+    with pytest.raises(ValueError, match='float overflow'):
+        _as_real_float(value, type_error='invalid scalar', overflow_error='float overflow')
+
+
+@pytest.mark.parametrize('value', [0.05, np.float32(0.5), np.nextafter(1., 0.)])
+def test_validate_probability_accepts_open_interval(value):
+    """Should accept representable probabilities strictly inside the interval."""
+    assert _validate_probability(value, 'level') is None
+
+
+@pytest.mark.parametrize('value', [0, 1, -0.5, 1.5, True, np.bool_(False), np.nan, np.inf, '0.5',
+                                 np.timedelta64(1, 'D')])
+def test_validate_probability_rejects_invalid_scalars(value):
+    """Should reject endpoints and invalid scalar types with a named ValueError."""
+    with pytest.raises(ValueError, match='level must be strictly between 0 and 1'):
+        _validate_probability(value, 'level')
+
+
+@pytest.mark.parametrize('seed', [None, 0, np.int64(4), np.uint64(2 ** 64 - 1), 2 ** 100])
+def test_validate_random_state_accepts_supported_seeds(seed):
+    """Should accept optional non-negative integer seeds without narrowing their range."""
+    assert _validate_random_state(seed) is None
+
+
+@pytest.mark.parametrize('seed', [True, np.bool_(True), 1., '1', np.timedelta64(1, 'D')])
+def test_validate_random_state_rejects_non_integer_seeds(seed):
+    """Should reject booleans, durations, and coercible noninteger seeds."""
+    with pytest.raises(TypeError, match='random_state must be an integer or None'):
+        _validate_random_state(seed)
+
+
+def test_validate_random_state_rejects_negative_seeds():
+    """Should reject a negative seed before a consumer initializes its RNG."""
+    with pytest.raises(ValueError, match='expected non-negative integer'):
+        _validate_random_state(np.int64(-1))
+
+
+def test_asset_positions_groups_interleaved_symbols_in_input_order():
+    """Should retain each asset's temporal row order without sorting the frame."""
+    result = _asset_positions(['AAPL', 'MSFT', 'AAPL', 'GOOGL', 'MSFT'])
+
+    assert result == [[0, 2], [1, 4], [3]]
+
+
+
+def test_asset_positions_requires_hashable_identities():
+    """Should reject nested unhashable asset identifiers."""
+    with pytest.raises(TypeError, match='unhashable'):
+        _asset_positions([['A']])
+
+
+@pytest.mark.parametrize('kind', [
+    'list',
+    pytest.param('wide_integer', marks=pytest.mark.skipif(not hasattr(pl, 'Int128'), reason='Polars has no Int128')),
+])
+def test_grouping_preserves_native_polars_asset_keys(kind):
+    """Should preserve asset identities that cannot be grouped through a NumPy array."""
+    from alpha_research.features.transformations import rolling_rank
+
+    if kind == 'list':
+        symbols = pl.Series([[1], [2], [1], [2]])
+    else:
+        symbols = pl.Series([2 ** 80, 2 ** 80 + 1, 2 ** 80, 2 ** 80 + 1], dtype=pl.Int128)
+    assert _asset_positions(symbols) == [[0, 2], [1, 3]]
+
+    frame = pl.DataFrame({'symbol': symbols, 'time': [3, 1, 4, 2], 'x': [8., 5., 9., 4.]})
+    result = rolling_rank(frame, 'x', window=2)
+    assert result['symbol'].equals(frame['symbol'])
+    assert result['x_rolling_rank_2'].to_list() == [None, None, 2., 1.]
+
+
+@pytest.mark.parametrize('constructor', [np.asarray, pd.Series, pl.Series])
+def test_validate_and_group_times_preserves_interleaved_positions(constructor):
+    """Should accept overlapping times across assets and preserve first-seen order."""
+    symbols = constructor(['B', 'A', 'B', 'A'])
+    times = constructor([4, 1, 5, 2])
+    groups = _validate_and_group_times(symbols, times, 'asset', 'date')
+    assert [group.tolist() for group in groups] == [[0, 2], [1, 3]]
+
+
+def test_validate_and_group_times_preserves_pandas_category_order():
+    """Should use the configured temporal category order rather than lexical order."""
+    symbols = pd.Series(['A', 'A'], index=[50, 20])
+    times = pd.Series(pd.Categorical(['early', 'late'], categories=['early', 'late'], ordered=True))
+    times = times.cat.rename_categories(['z_first', 'a_second'])
+    assert [group.tolist() for group in _validate_and_group_times(symbols, times, 'asset', 'date')] == [[0, 1]]
+    with pytest.raises(ValueError, match='date must be increasingly ordered within each asset'):
+        _validate_and_group_times(symbols, times.iloc[::-1], 'asset', 'date')
+
+
+@pytest.mark.parametrize('symbols, times, exception, message', [
+    (pd.Series(['A']), pl.Series([1]), TypeError, 'same backend'),
+    (np.array([['A']]), np.array([1]), ValueError, 'one-dimensional arrays'),
+    (pl.Series(['A', 'B']), pl.Series([1]), ValueError, 'aligned'),
+    (pl.Series([1., np.nan]), pl.Series([1, 2]), ValueError, 'asset must not contain missing values'),
+    (pl.Series(['A', 'A']), pl.Series([1., np.nan]), ValueError, 'date must not contain missing values'),
+    (pl.Series(['A', 'A']), pl.Series([1, 1]), ValueError, 'unique values within each asset'),
+    (pl.Series(['A', 'A']), pl.Series([2, 1]), ValueError, 'increasingly ordered'),
+])
+def test_validate_and_group_times_checks_input_contract(symbols, times, exception, message):
+    """Should reject mismatched data, missing identities, and invalid within-asset ordering."""
+    with pytest.raises(exception, match=message):
+        _validate_and_group_times(symbols, times, 'asset', 'date')
+
+
+def test_validate_and_group_times_preserves_interleaved_symbol_order():
+    """Should retain each symbol's input positions after validation."""
+    groups = _validate_and_group_times(
+        symbols=np.array(['AAPL', 'MSFT', 'AAPL', 'MSFT']),
+        times=np.array([1, 1, 2, 2]),
+        symbol_col='symbol',
+        time_col='time',
+    )
+
+    assert [group.tolist() for group in groups] == [[0, 2], [1, 3]]
+
+
+@pytest.mark.parametrize(
+    ('symbols', 'times', 'message'),
+    [
+        (np.array(['AAPL', None]), np.array([1, 2]), 'symbol'),
+        (np.array(['AAPL', 'AAPL']), np.array([1, np.nan]), 'time'),
+        (np.array(['AAPL', 'AAPL']), np.array([1, 1]), 'unique'),
+        (np.array(['AAPL', 'AAPL']), np.array([2, 1]), 'increasingly'),
+    ],
+)
+def test_validate_and_group_times_rejects_invalid_time_keys(symbols, times, message):
+    """Should require complete, unique, ordered time keys within each symbol."""
+    with pytest.raises(ValueError, match=message):
+        _validate_and_group_times(symbols, times, 'symbol', 'time')
+
+
+# ------------------------------------------------------
+# Single-asset validation
+# ------------------------------------------------------
+def test_validate_single_symbol_accepts_one_pandas_symbol():
+    """Should accept a pandas DataFrame containing one non-missing symbol."""
+    frame = pd.DataFrame({'symbol': ['AAPL', 'AAPL']})
+    _validate_single_symbol(frame, 'symbol')
+
+
+def test_validate_single_symbol_accepts_one_polars_symbol():
+    """Should accept a Polars DataFrame containing one non-missing symbol."""
+    frame = pl.DataFrame({'symbol': ['AAPL', 'AAPL']})
+    _validate_single_symbol(frame, 'symbol')
+
+
+def test_validate_single_symbol_rejects_multiple_pandas_symbols():
+    """Should reject a pandas DataFrame containing multiple symbols."""
+    frame = pd.DataFrame({'symbol': ['AAPL', 'MSFT']})
+    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
+        _validate_single_symbol(frame, 'symbol')
+
+
+def test_validate_single_symbol_rejects_multiple_polars_symbols():
+    """Should reject a Polars DataFrame containing multiple symbols."""
+    frame = pl.DataFrame({'symbol': ['AAPL', 'MSFT']})
+    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
+        _validate_single_symbol(frame, 'symbol')
+
+
+def test_validate_single_symbol_rejects_missing_pandas_symbols():
+    """Should reject a pandas DataFrame containing missing symbols."""
+    frame = pd.DataFrame({'symbol': ['AAPL', None]})
+    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
+        _validate_single_symbol(frame, 'symbol')
+
+
+def test_validate_single_symbol_rejects_missing_polars_symbols():
+    """Should reject a Polars DataFrame containing missing symbols."""
+    frame = pl.DataFrame({'symbol': ['AAPL', None]})
+    with pytest.raises(ValueError, match='exactly one non-missing symbol'):
+        _validate_single_symbol(frame, 'symbol')
+
+
+# ------------------------------------------------------
+# Column extraction and feature validation
+# ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_as_numpy_values_preserves_the_selected_column(backend):
+    """Should preserve extracted values for both supported backends."""
+    pandas_df = pd.DataFrame({'value': [1, 2, 3]})
+    df = pandas_df if backend == 'pandas' else pl.from_pandas(pandas_df)
+
+    np.testing.assert_array_equal(_as_numpy_values(df, 'value'), [1, 2, 3])
+
+
+def test_polars_feature_values_handles_null_dtype_and_missing_column():
+    """Should normalize Null dtype without modifying source or accepting absent columns."""
+    frame = pl.DataFrame({'x': [None, None]})
+    assert frame.select(_polars_feature_values(frame, 'x')).schema['x'] == pl.Float64
+    assert frame.schema['x'] == pl.Null
+    with pytest.raises(KeyError):
+        _polars_feature_values(frame, 'missing')
+
+
+@pytest.mark.parametrize(
+    'frame, features, error_type, message',
+    [
+        (pd.DataFrame({'x': [1.0]}), [], ValueError, 'empty'),
+        (pd.DataFrame({'x': [1.0]}), 'missing', KeyError, 'missing required'),
+        (pd.DataFrame({'x': ['a']}), 'x', ValueError, 'numeric'),
+        (pd.DataFrame({'x': [np.inf]}), 'x', ValueError, 'finite'),
+    ],
+)
+def test_validate_elementwise_features_rejects_invalid_inputs(
+        frame,
+        features,
+        error_type,
+        message,
+):
+    """Should enforce the direct helper contract for pointwise inputs."""
+    with pytest.raises(error_type, match=message):
+        _validate_elementwise_features(frame, features)
+
+
+def test_validate_elementwise_features_returns_normalized_names():
+    """Should normalize a valid single feature into a list."""
+    assert _validate_elementwise_features(pd.DataFrame({'x': [1.0]}), 'x') == ['x']
+
+
+def test_validate_grouped_features_contract():
+    """Should validate grouped feature names and keys without rejecting missing values."""
+    frame = pd.DataFrame({'time': [1, 2], 'symbol': ['A', 'A'], 'x': [np.nan, np.nan]})
+    assert _validate_grouped_features(frame, 'x', 'symbol', 'time') == ['x']
+    with pytest.raises(KeyError):
+        _validate_grouped_features(frame, 'x', 'symbol', 'missing')
+
+
+def test_validate_output_columns_rejects_conflicts():
+    """Should accept unused names and reject existing or repeated outputs."""
+    frame = pd.DataFrame({'x': [1.], 'x_sign': [9.]})
+    assert _validate_output_columns(frame, ['x'], 'abs') is None
+    with pytest.raises(ValueError, match='x_sign'):
+        _validate_output_columns(frame, ['x'], 'sign')
+    with pytest.raises(ValueError, match='repeat'):
+        _validate_output_columns(frame, ['x', 'x'], 'abs')
+
+
+# ------------------------------------------------------
+# Feature and covariate names
+# ------------------------------------------------------
+def test_normalize_feature_cols_accepts_string_and_list():
+    """Should normalize a single feature without altering a feature list."""
+    assert _normalize_feature_cols('feature') == ['feature']
+    assert _normalize_feature_cols(['feature_a', 'feature_b']) == ['feature_a', 'feature_b']
+
+
+@pytest.mark.parametrize('feature_cols, exception', [
+    ([], ValueError),
+    (123, TypeError),
+])
+def test_normalize_feature_cols_rejects_invalid_input(feature_cols, exception):
+    """Should validate feature-column input independently of public callers."""
+    with pytest.raises(exception):
+        _normalize_feature_cols(feature_cols)
+
+
+def test_normalize_covariates_accepts_one_or_many_covariates():
+    """Should normalize covariate names without changing order."""
+    assert _normalize_covariates('covariate_a') == ['covariate_a']
+    assert _normalize_covariates(['covariate_a', 'covariate_b']) == [
+        'covariate_a',
+        'covariate_b',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('covariates', 'error_type', 'message'),
+    [
+        ((), TypeError, 'string or a list'),
+        ([], ValueError, 'must not be empty'),
+        (['covariate_a', 1], TypeError, 'string or a list'),
+        (['covariate_a', 'covariate_a'], ValueError, 'duplicates'),
+    ],
+)
+def test_normalize_covariates_rejects_invalid_specifications(
+        covariates,
+        error_type,
+        message,
+):
+    """Should report invalid covariate specifications."""
+    with pytest.raises(error_type, match=message):
+        _normalize_covariates(covariates)
+
+
+@pytest.mark.parametrize('controls', ['', [''], ['z', ' ']])
+def test_covariates_rejects_empty_names(controls):
+    """Should reject empty control names without stripping legitimate surrounding spaces."""
+    with pytest.raises(ValueError, match='empty'):
+        _normalize_covariates(controls)
+    assert _normalize_covariates(' z ') == [' z ']

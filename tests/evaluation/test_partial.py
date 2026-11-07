@@ -4,7 +4,6 @@ import polars as pl
 import pytest
 
 from alpha_research.evaluation.partial import (
-    _normalize_covariates,
     _partial_complete_cases,
     _partial_residuals,
     _validate_min_n,
@@ -67,34 +66,6 @@ def partial_data_pandas():
 # ------------------------------------------------------
 # private helpers
 # ------------------------------------------------------
-def test_normalize_covariates_accepts_one_or_many_covariates():
-    """The covariate helper should normalize strings without changing order."""
-    assert _normalize_covariates('covariate_a') == ['covariate_a']
-    assert _normalize_covariates(['covariate_a', 'covariate_b']) == [
-        'covariate_a',
-        'covariate_b',
-    ]
-
-
-@pytest.mark.parametrize(
-    ('covariates', 'error_type', 'message'),
-    [
-        ((), TypeError, 'string or a list'),
-        ([], ValueError, 'must not be empty'),
-        (['covariate_a', 1], TypeError, 'string or a list'),
-        (['covariate_a', 'covariate_a'], ValueError, 'duplicates'),
-    ],
-)
-def test_normalize_covariates_rejects_invalid_specifications(
-        covariates,
-        error_type,
-        message,
-):
-    """The covariate helper should expose all input-validation failures."""
-    with pytest.raises(error_type, match=message):
-        _normalize_covariates(covariates)
-
-
 @pytest.mark.parametrize(
     ('feature', 'target', 'covariates', 'message'),
     [
@@ -461,14 +432,6 @@ def test_partial_roles_reject_invalid_names(name):
         _validate_partial_columns(name, 'target', ['z'])
     with pytest.raises((TypeError, ValueError)):
         _validate_partial_columns('feature', name, ['z'])
-
-
-@pytest.mark.parametrize('controls', ['', [''], ['z', ' ']])
-def test_covariates_rejects_empty_names(controls):
-    """Should reject empty control names without stripping legitimate surrounding spaces."""
-    with pytest.raises(ValueError, match='empty'):
-        _normalize_covariates(controls)
-    assert _normalize_covariates(' z ') == [' z ']
 
 
 def test_partial_rejects_ambiguous_selected_pandas_columns(orthogonal_partial_values):

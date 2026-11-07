@@ -4,7 +4,6 @@ import polars as pl
 import pytest
 
 from alpha_research.features.volatility import (
-    _asset_positions,
     _average_true_range_values,
     _feature_result_frame,
     _format_annualization_factor,
@@ -116,16 +115,6 @@ def test_format_annualization_factor_preserves_column_name_units():
     """Should format integer and fractional factors without decimal separators."""
     assert _format_annualization_factor(252.0) == '252'
     assert _format_annualization_factor(365.25) == '365_25'
-
-
-# ------------------------------------------------------
-# _asset_positions
-# ------------------------------------------------------
-def test_asset_positions_groups_interleaved_symbols_in_input_order():
-    """Should retain each asset's temporal row order without sorting the frame."""
-    result = _asset_positions(['AAPL', 'MSFT', 'AAPL', 'GOOGL', 'MSFT'])
-
-    assert result == [[0, 2], [1, 4], [3]]
 
 
 # ------------------------------------------------------

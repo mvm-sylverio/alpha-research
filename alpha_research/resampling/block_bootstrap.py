@@ -7,7 +7,12 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from alpha_research._utils import _validate_positive_integer
+from alpha_research._utils import (
+    _as_real_float,
+    _validate_positive_integer,
+    _validate_probability,
+    _validate_random_state,
+)
 from alpha_research.progress import (
     ProgressCallback,
     _progress_iter,
@@ -309,11 +314,7 @@ def moving_block_bootstrap(
 
     block_length = _validate_blocks(blocks)
 
-    if random_state is not None and (
-            not isinstance(random_state, (int, np.integer))
-            or isinstance(random_state, bool)
-    ):
-        raise TypeError('random_state must be an integer or None.')
+    _validate_random_state(random_state)
 
     rng = np.random.default_rng(random_state)
     n_blocks = (int(sample_size) + block_length - 1) // block_length
@@ -404,14 +405,11 @@ def _bootstrap_numeric_values(values: BootstrapValues) -> np.ndarray:
     for value in array:
         if value is None or value is pd.NA:
             continue
-        if not isinstance(value, Real) or isinstance(value, (bool, np.bool_, np.datetime64, np.timedelta64)):
-            raise TypeError('values must contain numeric estimates with real scalar types.')
-        try:
-            converted = float(value)
-        except OverflowError as error:
-            raise ValueError('estimates must be representable as floats.') from error
-        if not np.isfinite(converted) and np.isfinite(value):
-            raise ValueError('estimates must be representable as floats.')
+        converted = _as_real_float(
+            value,
+            type_error='values must contain numeric estimates with real scalar types.',
+            overflow_error='estimates must be representable as floats.',
+        )
         if np.isfinite(converted):
             numeric.append(converted)
     if not numeric:
@@ -511,12 +509,7 @@ def bootstrap_metrics(
         or values contains no finite estimates, or a summary is not representable.
     """
     # checks on the inputs
-    if (
-            not isinstance(confidence_level, (int, float, np.integer, np.floating))
-            or isinstance(confidence_level, bool)
-            or not 0 < confidence_level < 1
-    ):
-        raise ValueError('confidence_level must be strictly between 0 and 1.')
+    _validate_probability(confidence_level, 'confidence_level')
 
     finite_values = _bootstrap_numeric_values(values)
 

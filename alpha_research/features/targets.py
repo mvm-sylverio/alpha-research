@@ -5,7 +5,12 @@ import polars as pl
 import pandas as pd
 import numpy as np
 
-from alpha_research._utils import _validate_df, _validate_positive_integer
+from alpha_research._utils import (
+    _as_numpy_values,
+    _validate_and_group_times,
+    _validate_df,
+    _validate_positive_integer,
+)
 
 __all__ = ['fwd_returns', 'ohlc_triple_barrier_labels']
 
@@ -303,36 +308,6 @@ def _validate_barrier_spec(value: float | str, name: str) -> None:
         raise ValueError(f'{name} must be a positive finite scalar.')
 
 
-def _as_numpy_values(
-        df: pd.DataFrame | pl.DataFrame,
-        column: str,
-) -> np.ndarray:
-    """
-    Return a column as a NumPy array without changing its logical values.
-
-    Parameters
-    ----------
-    df : pd.DataFrame or pl.DataFrame
-        Source DataFrame containing column.
-    column : str
-        Name of the column to extract.
-
-    Returns
-    -------
-    np.ndarray
-        Values from column in input row order.
-
-    Raises
-    ------
-    KeyError
-        If column is not present in df.
-    """
-    if isinstance(df, pd.DataFrame):
-        return df[column].to_numpy()
-
-    return df.get_column(column).to_numpy()
-
-
 def _as_float_values(
         df: pd.DataFrame | pl.DataFrame,
         column: str,
@@ -365,57 +340,6 @@ def _as_float_values(
         return np.asarray(values, dtype=float)
     except (TypeError, ValueError) as error:
         raise TypeError(f'{column} must contain numeric values.') from error
-
-
-def _validate_and_group_times(
-        symbols: np.ndarray,
-        times: np.ndarray,
-        symbol_col: str,
-        time_col: str,
-) -> list[np.ndarray]:
-    """
-    Validate the per-symbol time contract and return input-order indices.
-
-    Parameters
-    ----------
-    symbols : np.ndarray
-        Asset identifiers in input row order.
-    times : np.ndarray
-        Observation times corresponding to symbols.
-    symbol_col : str
-        Symbol-column name used in validation error messages.
-    time_col : str
-        Time-column name used in validation error messages.
-
-    Returns
-    -------
-    list[np.ndarray]
-        One positional-index array per symbol, preserving input symbol order.
-
-    Raises
-    ------
-    ValueError
-        If symbols or times are missing, keys are duplicated, or times are not
-        increasingly ordered within a symbol.
-    """
-    if pd.isna(symbols).any():
-        raise ValueError(f'{symbol_col} must not contain missing values.')
-
-    if pd.isna(times).any():
-        raise ValueError(f'{time_col} must not contain missing values.')
-
-    keys = pd.DataFrame({symbol_col: symbols, time_col: times})
-    if keys.duplicated().any():
-        raise ValueError(f'df must contain unique [{symbol_col}, {time_col}] combinations.')
-
-    codes, _ = pd.factorize(symbols, sort=False)
-    groups = [np.flatnonzero(codes == code) for code in range(codes.max() + 1)]
-
-    for indices in groups:
-        if not pd.Index(times[indices]).is_monotonic_increasing:
-            raise ValueError(f'{time_col} must be increasingly ordered within each symbol.')
-
-    return groups
 
 
 def _barrier_values(

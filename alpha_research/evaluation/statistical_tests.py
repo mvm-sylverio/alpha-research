@@ -11,7 +11,7 @@ from statsmodels.stats.multitest import multipletests
 from scipy.stats import norm
 import math
 
-from alpha_research._utils import _validate_df
+from alpha_research._utils import _has_missing_values, _validate_df, _validate_positive_integer, _validate_probability
 
 __all__ = ['newey_west_tstat', 'adf_test', 'stationarity_test', 'NWTestResult', 'ADFTestResult', 'fdr_correction',
            'benjamini_hochberg', 'benjamini_yekutieli', 'WaldTemporalAssociationTestResult',
@@ -198,7 +198,7 @@ def _newey_west_with_continuity(reference: pd.DataFrame | pl.DataFrame, observat
         dates = frame[date_column]
         if any(not isinstance(date, Hashable) for date in dates.to_list()):
             raise TypeError('dates must contain hashable values.')
-        if (dates.isna().any() if isinstance(frame, pd.DataFrame) else dates.is_null().any() or (dates.dtype.is_float() and dates.is_nan().any())):
+        if _has_missing_values(dates):
             raise ValueError('dates must not contain missing values.')
     if len(_contiguous_numeric_series(observations[value_column])) != len(observations):
         raise ValueError('observation values must not contain missing values.')
@@ -315,12 +315,7 @@ def wald_temporal_association_test(
     A zero bootstrap standard error makes the Wald statistic undefined and is
     therefore rejected.
     """
-    if (
-            not isinstance(confidence_level, (int, float, np.integer, np.floating))
-            or isinstance(confidence_level, bool)
-            or not 0 < confidence_level < 1
-    ):
-        raise ValueError('confidence_level must be strictly between 0 and 1.')
+    _validate_probability(confidence_level, 'confidence_level')
 
     if any(isinstance(value, (bool, np.bool_)) for value in (observed_association, bootstrap_standard_error, null_value)):
         raise ValueError('observed_association, bootstrap_standard_error, and null_value must be numeric and non-boolean.')
@@ -431,10 +426,8 @@ def adf_test(
     This function always uses the default store=False. Under this configuration, adfuller always return
     t-stat, p-value and used_lags in consistent order.
     """
-    if isinstance(significance_level, (bool, np.bool_)) or not isinstance(significance_level, (int, float, np.integer, np.floating)) or not 0 < significance_level < 1:
-        raise ValueError('significance_level must be strictly between 0 and 1.')
-    if isinstance(minimum_observations, (bool, np.bool_)) or not isinstance(minimum_observations, (int, np.integer)) or minimum_observations < 1:
-        raise ValueError('minimum_observations must be a positive integer.')
+    _validate_probability(significance_level, 'significance_level')
+    _validate_positive_integer(minimum_observations, 'minimum_observations')
     np_series = _contiguous_numeric_series(series)
 
     # inital checks - minimum length and constant series
@@ -582,12 +575,11 @@ def fdr_correction(
     _validate_df(df, [feature_group_column])
     _validate_df(df, [p_value_column], check_all_missing=False)
 
-    if isinstance(fdr, (bool, np.bool_)) or not isinstance(fdr, (int, float, np.integer, np.floating)) or not 0 < fdr < 1:
-        raise ValueError('fdr must be strictly between 0 and 1.')
+    _validate_probability(fdr, 'fdr')
     if method not in ('bh', 'by'):
         raise ValueError("method must be 'bh' or 'by'.")
     groups = df[feature_group_column]
-    if (groups.isna().any() if isinstance(df, pd.DataFrame) else groups.is_null().any() or (groups.dtype.is_float() and groups.is_nan().any())):
+    if _has_missing_values(groups):
         raise ValueError('feature groups must not contain missing values.')
     p_series = df[p_value_column]
     if isinstance(df, pd.DataFrame):

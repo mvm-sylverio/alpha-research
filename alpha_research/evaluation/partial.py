@@ -1,4 +1,3 @@
-from numbers import Real
 from typing import Literal
 
 import numpy as np
@@ -6,47 +5,9 @@ import pandas as pd
 import polars as pl
 from scipy.stats import pearsonr, rankdata
 
-from alpha_research._utils import _validate_df
+from alpha_research._utils import _as_real_float, _normalize_covariates, _validate_df
 
 __all__ = ['partial_correlation']
-
-
-def _normalize_covariates(covariates: str | list[str]) -> list[str]:
-    """
-    Normalize one or more covariate names into a validated list.
-
-    Parameters
-    ----------
-    covariates : str | list[str]
-        One covariate name or a non-empty list of unique covariate names.
-
-    Returns
-    -------
-    list[str]
-        Covariate names in the order supplied by the caller.
-
-    Raises
-    ------
-    TypeError
-        If covariates is neither a string nor a list of strings.
-    ValueError
-        If covariates is empty or contains duplicate names.
-    """
-    if isinstance(covariates, str):
-        covariates = [covariates]
-
-    if not isinstance(covariates, list):
-        raise TypeError('covariates must be a string or a list of strings.')
-    if not covariates:
-        raise ValueError('covariates must not be empty.')
-    if not all(isinstance(covariate, str) for covariate in covariates):
-        raise TypeError('covariates must be a string or a list of strings.')
-    if any(not covariate.strip() for covariate in covariates):
-        raise ValueError('covariate names must not be empty.')
-    if len(set(covariates)) != len(covariates):
-        raise ValueError('covariates must not contain duplicates.')
-
-    return covariates
 
 
 def _validate_partial_columns(
@@ -150,8 +111,6 @@ def _partial_complete_cases(df: pd.DataFrame | pl.DataFrame, columns: list[str])
     if len(set(columns)) != len(columns):
         raise ValueError('selected columns must be distinct.')
     _validate_df(df, columns, check_all_missing=False)
-    if isinstance(df, pd.DataFrame) and any(df.columns.to_list().count(name) != 1 for name in columns):
-        raise ValueError('selected column names must be unique in the DataFrame.')
     values = np.empty((len(df), len(columns)), dtype=float)
     for index, column in enumerate(columns):
         series = df[column]
@@ -167,15 +126,11 @@ def _partial_complete_cases(df: pd.DataFrame | pl.DataFrame, columns: list[str])
             if value is None or value is pd.NA:
                 values[row, index] = np.nan
                 continue
-            if not isinstance(value, Real) or isinstance(value, (bool, np.bool_, np.datetime64, np.timedelta64)):
-                raise TypeError('feature, target, and covariates must be numeric real scalars.')
-            try:
-                numeric = float(value)
-            except OverflowError as error:
-                raise ValueError('selected values must be representable as floats.') from error
-            if not np.isfinite(numeric) and np.isfinite(value):
-                raise ValueError('selected values must be representable as floats.')
-            values[row, index] = numeric
+            values[row, index] = _as_real_float(
+                value,
+                type_error='feature, target, and covariates must be numeric real scalars.',
+                overflow_error='selected values must be representable as floats.',
+            )
     return values[np.isfinite(values).all(axis=1)]
 
 
