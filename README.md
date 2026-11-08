@@ -48,6 +48,8 @@ input DataFrame backend whenever practical.
   association, time-series feature values, and cross-sectional feature summaries.
 - Resampling utilities for moving-block bootstrap summaries and bootstrap
   Monte Carlo convergence diagnostics.
+- Basic null-series generators for zero-drift Gaussian random walks and guarded
+  circular shifts of Pandas or Polars Series.
 - ADF stationarity testing.
 
 ## Installation
