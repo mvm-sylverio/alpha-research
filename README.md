@@ -275,6 +275,48 @@ the same ordered time grid. Distribution windows still report available finite
 values when other observations are missing; rolling temporal association keeps
 its strict complete-pair rule.
 
+## Comparing numeric distributions
+
+Four origin-agnostic plots compare named numeric samples on existing subplots.
+Samples may be sequences, NumPy arrays, or Pandas/Polars Series. Missing and
+infinite values are excluded per sample; repetitions retain their frequency.
+
+```python
+import matplotlib.pyplot as plt
+import numpy as np
+
+from alpha_research.visualization import (
+    plot_boxplot_comparison,
+    plot_ecdf_comparison,
+    plot_exceedance_comparison,
+    plot_histogram_comparison,
+)
+
+samples = {
+    'Baseline': [0.02, 0.04, 0.05, 0.06, 0.08],
+    'Alternative': [-0.04, -0.01, 0.0, 0.02, 0.04],
+}
+magnitudes = {name: np.abs(values) for name, values in samples.items()}
+figure, axes = plt.subplots(2, 2, figsize=(11, 8))
+plot_histogram_comparison(samples, ax=axes[0, 0], bins=8)
+plot_ecdf_comparison(magnitudes, ax=axes[0, 1], value_label='Absolute estimate')
+plot_exceedance_comparison(magnitudes, ax=axes[1, 0], value_label='Absolute estimate')
+plot_boxplot_comparison(
+    samples, ax=axes[1, 1], reference_value=0.05,
+    note='Samples may represent different sources of variation.',
+)
+figure.tight_layout()
+```
+
+Histograms use shared bins and default to per-sample proportions. Set
+`stat='count'` or `stat='density'` for counts or unit-area density; explicit
+edges must cover all finite observations. ECDF curves show `P(value <= x)`;
+exceedance curves show `P(value >= x)`, including ties. Box plots show quartiles,
+medians, and Tukey whiskers, not confidence intervals. Each function accepts
+`colors`, `title`, `note`, and an optional `reference_value`/`reference_label`.
+The caller supplies sample origins and any magnitude transformation. These
+plots do not run statistical tests or infer significance from visual overlap.
+
 ## Rolling temporal association
 
 `rolling_temporal_association()` evaluates local temporal association in full,

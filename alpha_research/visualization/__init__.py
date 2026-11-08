@@ -1,3 +1,9 @@
+from alpha_research.visualization.comparison import (
+    plot_boxplot_comparison,
+    plot_ecdf_comparison,
+    plot_exceedance_comparison,
+    plot_histogram_comparison,
+)
 from alpha_research.visualization.decay import plot_decay_curves
 from alpha_research.visualization.descriptive_statistics import (
     plot_distribution_histogram,
@@ -23,13 +29,17 @@ from alpha_research.visualization.timeseries import (
 )
 
 __all__ = [
+    'plot_boxplot_comparison',
     'plot_cross_sectional_value_summary',
     'plot_decay_curves',
     'plot_distribution_histogram',
     'plot_distribution_qq',
     'plot_distribution_quantiles',
+    'plot_ecdf_comparison',
+    'plot_exceedance_comparison',
     'plot_feature_target_bins',
     'plot_feature_target_scatter',
+    'plot_histogram_comparison',
     'plot_ic_summary',
     'plot_partial_ic_summary',
     'plot_partial_temporal_association_summary',

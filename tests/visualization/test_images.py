@@ -5,8 +5,12 @@ import pandas as pd
 import pytest
 
 from alpha_research.visualization import (
+    plot_boxplot_comparison,
     plot_cross_sectional_value_summary,
     plot_decay_curves,
+    plot_ecdf_comparison,
+    plot_exceedance_comparison,
+    plot_histogram_comparison,
     plot_ic_summary,
     plot_partial_ic_summary,
     plot_partial_temporal_association_summary,
@@ -49,6 +53,57 @@ def test_representative_plot_image_regression(kind):
             # A small pixel tolerance accommodates renderer/platform details;
             # numerical coordinates are checked independently in artist tests.
             assert rms <= 0.01, f'Image RMS difference {rms:.6f} exceeds 0.01.'
+        finally:
+            plt.close(figure)
+
+
+@pytest.mark.parametrize('kind', ['histogram', 'ecdf', 'exceedance', 'boxplot'])
+def test_comparison_plot_image_regression(kind):
+    """Should preserve shared bins, tied empirical steps, boxes, legends, references, and annotations."""
+    matplotlib = pytest.importorskip('matplotlib')
+    matplotlib.use('Agg')
+    import matplotlib.image as mpimg
+    import matplotlib.pyplot as plt
+
+    # References use explicit polygons, line segments, and rectangles, without
+    # these plotters, histogram/percentile calculations, or empirical-curve tools.
+    # For A=[0,1,1,2,3,10], B=[1,2,3,3,5] and edges [0,1,3,10], bin
+    # proportions are A=[1/6,3/6,2/6], B=[0,2/5,3/5]. At unique observed
+    # thresholds, CDFs are A=[1/6,3/6,4/6,5/6,1], B=[1/5,2/5,4/5,1];
+    # inclusive exceedances are A=[1,5/6,3/6,2/6,1/6], B=[1,4/5,3/5,1/5].
+    # Linear quartiles/medians are A=(1,1.5,2.75), B=(2,3,3), whiskers
+    # A=(0,3), B=(1,3), and fliers A=[10], B=[5], calculated by hand.
+    settings = {**matplotlib.rcParamsDefault, 'backend': 'Agg', 'font.family': 'DejaVu Sans',
+                'font.size': 10, 'figure.dpi': 100, 'savefig.dpi': 100,
+                'legend.loc': 'lower right' if kind == 'ecdf' else 'upper right'}
+    with matplotlib.rc_context(settings):
+        figure, axis = plt.subplots(figsize=(8, 4), dpi=100)
+        try:
+            figure.subplots_adjust(left=.17, bottom=.2, right=.96, top=.88)
+            samples = {'Sample A': [0., 1., 1., 2., 3., 10.], 'Sample B': [1., 2., 3., 3., 5.]}
+            plotter = {'histogram': plot_histogram_comparison, 'ecdf': plot_ecdf_comparison,
+                       'exceedance': plot_exceedance_comparison, 'boxplot': plot_boxplot_comparison}[kind]
+            options = {'bins': [0., 1., 3., 10.]} if kind == 'histogram' else {}
+            plotter(samples, ax=axis, colors={'Sample A': 'C0', 'Sample B': 'C1'},
+                    value_label='Estimate', title=f'{kind.capitalize()} comparison',
+                    note='Different sample origins; boxes show quartiles.' if kind == 'boxplot' else None,
+                    reference_value=2.5, reference_label='Observed', **options)
+            if kind == 'boxplot':
+                axis.set(xlim=(.5, 2.5), ylim=(-1., 11.), yticks=[0, 2, 4, 6, 8, 10])
+            else:
+                axis.set(xlim=(-.5, 10.5), ylim=(0., 1.), xticks=[0, 1, 3, 5, 10], yticks=[0., .25, .5, .75, 1.])
+            figure.canvas.draw()
+            renderer = figure.canvas.get_renderer()
+            # Guard against clipped labels/notes independently of pixel tolerance.
+            for artist in [axis.title, axis.xaxis.label, axis.yaxis.label, axis.get_legend(), *axis.texts]:
+                bounds = artist.get_window_extent(renderer)
+                assert bounds.x0 >= figure.bbox.x0 and bounds.x1 <= figure.bbox.x1
+                assert bounds.y0 >= figure.bbox.y0 and bounds.y1 <= figure.bbox.y1
+            actual = np.asarray(figure.canvas.buffer_rgba(), dtype=float) / 255.
+            expected = mpimg.imread(Path(__file__).parent / 'baseline_images' / f'comparison_{kind}.png')
+            assert actual.shape == expected.shape
+            rms = np.sqrt(np.mean((actual - expected) ** 2))
+            assert rms <= .01, f'Image RMS difference {rms:.6f} exceeds 0.01.'
         finally:
             plt.close(figure)
 
