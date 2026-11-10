@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -1024,6 +1025,7 @@ def temporal_association_summary_table(
         continuity_col: str | None = None,
         *,
         on_progress: ProgressCallback | None = None,
+        on_bootstrap_estimates: Callable[[str, tuple[float, ...]], None] | None = None,
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Summarize bootstrap temporal-association diagnostics for one or more features.
@@ -1070,6 +1072,10 @@ def temporal_association_summary_table(
         total may be None. Checkpoints may repeat a count. Exceptions
         propagate unchanged, allowing cooperative cancellation.
         Reports features, blocks, sample allocation, and estimates.
+    on_bootstrap_estimates : callable | None, default None
+        Optional synchronous observer receiving the feature name and immutable
+        estimates from its original bootstrap, including undefined estimates.
+        Called once per feature after its summary and Wald test succeed.
 
     Returns
     -------
@@ -1090,7 +1096,7 @@ def temporal_association_summary_table(
     KeyError
         If required dataset columns are absent.
     TypeError
-        If on_progress is not a synchronous callable or None.
+        If an observer is not a synchronous callable or None.
         If df or a downstream argument uses an unsupported type.
 
     Notes
@@ -1113,6 +1119,10 @@ def temporal_association_summary_table(
     reject_h0 and p_value are determined only by the Wald test.
     """
     _validate_progress_callback(on_progress)
+    try:
+        _validate_progress_callback(on_bootstrap_estimates)
+    except TypeError as error:
+        raise TypeError('on_bootstrap_estimates must be a synchronous callback or None.') from error
     _validate_feature_list(feature_list)
     _validate_summary_bootstrap_configuration(
         block_length=block_length,
@@ -1180,6 +1190,8 @@ def temporal_association_summary_table(
             bootstrap_standard_error=metrics.std,
             confidence_level=confidence_level,
         )
+        if on_bootstrap_estimates is not None:
+            on_bootstrap_estimates(feature, tuple(bootstrap_estimates))
         feature_group = (
             feature_groups.get(feature, 'ungrouped')
             if feature_groups is not None
