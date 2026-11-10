@@ -1467,6 +1467,46 @@ def test_summarize_rolling_temporal_association_rejects_mixed_metadata():
 # ------------------------------------------------------
 # temporal_association_summary_table
 # ------------------------------------------------------
+@pytest.mark.parametrize('backend', ['pandas', 'polars'])
+def test_temporal_summary_observes_original_bootstrap_estimates(monkeypatch, temporal_summary_df_pandas, backend):
+    """Should report the exact original estimates once without mutating the summary."""
+    frame = temporal_summary_df_pandas if backend == 'pandas' else pl.from_pandas(temporal_summary_df_pandas)
+    samples = [pd.DataFrame({'feature_a': [1., 2., 3.], 'target': target})
+               for target in ([1., 2., 3.], [3., 2., 1.], [1., 1., 1.])]
+    if backend == 'polars':
+        samples = [pl.from_pandas(sample) for sample in samples]
+
+    def resample(*args, **kwargs):
+        """Should return increasing, decreasing, and constant targets in order."""
+        return samples
+
+    monkeypatch.setattr('alpha_research.evaluation.timeseries.moving_block_bootstrap', resample)
+    received = []
+    result = temporal_association_summary_table(frame, ['feature_a'], 'target', 3, 3,
+                                               on_bootstrap_estimates=lambda *values: received.append(values))
+    # Perfect signed rank associations have zero mean. The constant target is undefined.
+    assert len(received) == 1 and received[0][0] == 'feature_a'
+    assert isinstance(received[0][1], tuple)
+    assert received[0][1][:2] == pytest.approx((1., -1.)) and np.isnan(received[0][1][2])
+    assert result['n_bootstraps'][0] == 2 and result['bootstrap_mean'][0] == pytest.approx(0.)
+
+
+def test_temporal_summary_validates_bootstrap_observer_and_propagates_failure(temporal_summary_df_pandas):
+    """Should reject a non-synchronous observer and propagate an observer's exact exception."""
+    args = (temporal_summary_df_pandas, ['feature_a'], 'target', 3, 10)
+    with pytest.raises(TypeError, match='on_bootstrap_estimates'):
+        temporal_association_summary_table(*args, on_bootstrap_estimates=17)
+    error = RuntimeError('observer failed')
+
+    def fail(*args):
+        """Should raise after receiving the completed feature estimates."""
+        raise error
+
+    with pytest.raises(RuntimeError) as caught:
+        temporal_association_summary_table(*args, random_state=42, on_bootstrap_estimates=fail)
+    assert caught.value is error
+
+
 def test_temporal_association_summary_table_single_feature(temporal_summary_df_pandas):
     """Should return one result row with the expected temporal diagnostics."""
     result = temporal_association_summary_table(
