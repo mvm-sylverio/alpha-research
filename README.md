@@ -23,6 +23,11 @@ input DataFrame backend whenever practical.
   log1p, signed-log1p, and fixed clipping; cross-sectional rank, z-score, and
   rank-based quantile groups; trailing per-asset rank, z-score, and rank-based
   quantile groups.
+- Explicit category transformations: `ordinal_mapping` uses a supplied label
+  order and strictly increasing codes (zero-based by default); `binary_mapping`
+  maps two selected categories to zero and one. Both append new columns, retain
+  original labels and missing values, and reject unknown categories. Nominal
+  categories are never assigned an automatic numeric order.
 - Aligned feature interactions: ratio, product, directional difference, and
   fixed-threshold conditional features.
 - Research data utilities: feature/target schema helpers and purged

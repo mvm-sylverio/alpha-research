@@ -19,14 +19,17 @@ from alpha_research._utils import (
     _validate_output_columns,
     _validate_positive_integer,
 )
+from alpha_research.features.encoding import binary_mapping, ordinal_mapping
 
 __all__ = [
     'absolute',
+    'binary_mapping',
     'clip',
     'cross_sectional_quantile_rank',
     'cross_sectional_rank',
     'cross_sectional_zscore',
     'log1p',
+    'ordinal_mapping',
     'power',
     'rolling_quantile_rank',
     'rolling_rank',
