@@ -85,6 +85,16 @@ Install MetaTrader 5 support for OHLCV data ingestion:
 pip install "alpha-research[mt5]"
 ```
 
+## Evaluation requirements
+
+`alpha_research.evaluation.requirements.EVALUATION_REQUIREMENTS` exposes
+structured input requirements for public evaluation and resampling functions.
+Declarations describe observation layout, axis order, entity identity,
+missing values, and inference independently of the dataset's domain.
+For example, a cross-sectional IC can group on assets column, while a
+single-sequence association requires unique, increasing coordinates or time.
+Existing functions validate their actual inputs.
+
 ## Cross-sectional IC
 
 Cross-sectional IC measures the association between a feature and a forward
